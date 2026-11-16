@@ -19,15 +19,14 @@
   // Tell the JiraTime page we are here. The page answers with "ack"; only then do we claim success.
   function announce(first) {
     var t = toApp();
-    if (!t || t.closed) { if (first) say("This tab was not opened from JiraTime. Go to JiraTime → NewersWorld Timesheet → \"Open NewersWorld\", then click the bookmark in that new tab.", true); return; }
-    t.postMessage({ jt: "ready" }, APP_ORIGIN);
     if (first) {
       st.acked = false;
       say("Connecting to " + host + "…");
       setTimeout(function () {
-        if (!st.acked) say("Could not reach JiraTime at " + host + ". This bookmark was made for a different address. Delete it and drag the ⭐ link again from the JiraTime page you are using.", true);
-      }, 2500);
+        if (!st.acked) say("No answer from JiraTime (" + host + "). Use the \"Open NewersWorld\" button on that page to open THIS tab, then click the bookmark again. [tab origin: " + location.origin + "; opener: " + (toApp() ? "yes" : "no") + "]", true);
+      }, 3500);
     }
+    if (t && !t.closed) t.postMessage({ jt: "ready" }, APP_ORIGIN);   // the app can also reach us without this (it pings the tab it opened)
   }
   if (window.__JT_AGENT_LOADED) { announce(true); return; }
   window.__JT_AGENT_LOADED = true;
@@ -808,6 +807,7 @@
 
   window.addEventListener("message", function (e) {
     if (e.origin !== APP_ORIGIN || !e.data || !e.source) return;
+    if (e.data.jt === "req") st.acked = true;      // the app is talking to us, so the link works
     if (e.data.jt === "ack") { if (!st.acked) { st.acked = true; say("JiraTime agent connected ✓ (" + host + ")"); } return; }
     if (e.data.jt !== "req") return;
     var id = e.data.id, msg = e.data.msg || {};

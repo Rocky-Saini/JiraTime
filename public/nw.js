@@ -8,30 +8,38 @@ const toNw = (s) => `${s.slice(8)}-${NWM[+s.slice(5, 7) - 1]}-${s.slice(0, 4)}`;
 const nwStrip = (s) => String(s || "").replace(/\s+/g, " ").trim();
 const mondayIso = (iso) => ymdOf(mondayOf(new Date(iso + "T00:00:00")));
 
-const NWA = { win: null, ready: false, origin: "https://newersworld.tothenew.com", url: (monday) => `https://newersworld.tothenew.com/#/timesheet?date=${toNw(monday)}` };
+const NWA = { win: null, ready: false, hint: "", seen: [], allowSuffix: [".tothenew.com"], origin: "https://newersworld.tothenew.com", url: (monday) => `https://newersworld.tothenew.com/#/timesheet?date=${toNw(monday)}` };
 const NW = { plan: null, dates: [], rows: [], asked: false, busy: false, prefs: { task: "", hours: "jira", comments: false, overwrite: false } };
 
 // ================= agent channel (postMessage) =================
+// Accept the expected NewersWorld origin, or any other *.tothenew.com host (e.g. if the portal redirects to a sibling host).
+function nwOriginOk(o) {
+  if (o === NWA.origin) return true;
+  try { const u = new URL(o); return NWA.allowSuffix.some((s) => u.hostname.endsWith(s) && (u.protocol === "https:" || u.hostname === "localhost")); } catch { return false; }
+}
+
 window.addEventListener("message", (e) => {
-  if (e.origin !== NWA.origin || !e.data || e.data.jt !== "ready") return;
+  if (!e.data || e.data.jt !== "ready") return;
+  if (!nwOriginOk(e.origin)) { NWA.seen.push(e.origin); toast(`Agent message came from ${e.origin}, which is not a NewersWorld address. Open NewersWorld with the button on this page.`); return; }
   const first = !NWA.ready;
-  NWA.win = e.source; NWA.ready = true; nwPill();
+  NWA.origin = e.origin; NWA.win = e.source; NWA.ready = true; nwPill();
   e.source.postMessage({ jt: "ack" }, NWA.origin);          // lets the agent confirm the link works both ways
   if (first) toast("NewersWorld agent connected ✓");
 });
 
-function nwCall(msg, timeoutMs = 30000) {
+function nwCall(msg, timeoutMs = 30000, target) {
   return new Promise((resolve, reject) => {
     if (!NWA.win || NWA.win.closed) { NWA.ready = false; nwPill(); return reject(new Error("NewersWorld tab is not connected. Open it from here and click the JiraTime Agent bookmark.")); }
     const id = uid();
     const onMsg = (e) => {
       const d = e.data;
-      if (e.origin !== NWA.origin || !d || d.jt !== "res" || d.id !== id) return;
+      if (!d || d.jt !== "res" || d.id !== id || !nwOriginOk(e.origin)) return;
+      NWA.origin = e.origin;
       clearTimeout(timer); window.removeEventListener("message", onMsg); resolve(d.res);
     };
     const timer = setTimeout(() => { window.removeEventListener("message", onMsg); reject(new Error("NewersWorld tab did not answer (timeout). Is the tab still open? Click the bookmark again.")); }, timeoutMs);
     window.addEventListener("message", onMsg);
-    NWA.win.postMessage({ jt: "req", id, msg }, NWA.origin);
+    NWA.win.postMessage({ jt: "req", id, msg }, target || NWA.origin);
   });
 }
 
@@ -42,11 +50,13 @@ async function nwPing() {
     const t0 = Date.now();
     while ((!NWA.win || NWA.win.closed) && Date.now() - t0 < 6000) await sleep(200);
   }
-  try { NWA.ready = !!(await nwCall({ type: "JT_PING" }, 2500))?.ok; NWA.hint = ""; }
-  catch (e) {
+  try {
+    let r; try { r = await nwCall({ type: "JT_PING" }, 2000); } catch { r = await nwCall({ type: "JT_PING" }, 2000, "*"); }
+    NWA.ready = !!r?.ok; NWA.hint = "";
+  } catch (e) {
     NWA.ready = false;
     NWA.hint = NWA.win && !NWA.win.closed
-      ? "The NewersWorld tab is open but its agent does not answer. Click the JiraTime Agent bookmark in that tab again. If it still fails, the bookmark belongs to another address: delete it and drag the ⭐ link from THIS page."
+      ? "The NewersWorld tab is open but its agent does not answer. Click the JiraTime Agent bookmark in THAT tab (the one opened by the button on this page). If it still fails, delete the old bookmark and drag the ⭐ link again from this page." + (NWA.seen.length ? ` (Messages arrived from: ${[...new Set(NWA.seen)].join(", ")})` : "")
       : "No NewersWorld tab is linked. Click “Open NewersWorld”, then click the bookmark in that tab.";
   }
   nwPill();
