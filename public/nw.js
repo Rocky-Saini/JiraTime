@@ -43,6 +43,18 @@ function nwCall(msg, timeoutMs = 30000, target) {
   });
 }
 
+// Keep pinging a NewersWorld window we hold until its agent answers (bookmark clicked there).
+let nwWatchTimer = null;
+function nwWatch(win, seconds = 120) {
+  clearInterval(nwWatchTimer);
+  const t0 = Date.now();
+  nwWatchTimer = setInterval(async () => {
+    if (NWA.ready || !win || win.closed || Date.now() - t0 > seconds * 1000) { clearInterval(nwWatchTimer); return; }
+    NWA.win = win;
+    try { const r = await nwCall({ type: "JT_PING" }, 900); if (r?.ok) { NWA.ready = true; nwPill(); toast("NewersWorld agent connected ✓"); clearInterval(nwWatchTimer); } } catch { /* not yet */ }
+  }, 1500);
+}
+
 async function nwPing() {
   // After an app reload the agent re-announces within ~5s; wait for that before giving up.
   if (!NWA.win || NWA.win.closed) {
@@ -345,7 +357,11 @@ async function nwOpened() {
   $("#nwOpen").onclick = () => {
     if (NWA.ready && NWA.win && !NWA.win.closed) { NWA.win.focus(); toast("Already connected — switched to the NewersWorld tab"); return; }   // do not reload a connected tab
     NWA.win = window.open(NWA.url(mondayIso(todayStr())), "jt-newersworld");
+    nwWatch(NWA.win);
   };
+  // Opened by the agent from inside NewersWorld ("Open JiraTime (connected)"): connect to that tab.
+  if (window.opener && !window.opener.closed) nwWatch(window.opener, 60);
+  if (location.hash === "#newersworld") { history.replaceState(null, "", location.pathname); setTimeout(() => document.querySelector('.nav[data-view="nw"]')?.click(), 300); }
   try {
     const code = (await fetch("/nw-agent.js").then((r) => r.text())).replace(/__APP_ORIGIN__/g, location.origin);
     $("#nwBm").setAttribute("href", "javascript:" + encodeURIComponent(code));

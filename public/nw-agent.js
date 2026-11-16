@@ -23,7 +23,7 @@
       st.acked = false;
       say("Connecting to " + host + "…");
       setTimeout(function () {
-        if (!st.acked) showPanel("No live link to JiraTime (" + host + ") — manual mode. In JiraTime click \"Copy request\", then press \"Read clipboard\" here (or paste into the box).");
+        if (!st.acked) showPanel("This tab is not linked to JiraTime (it was opened from somewhere else). Click the button below: JiraTime opens connected to this tab.");
       }, 3500);
     }
     if (t && !t.closed) t.postMessage({ jt: "ready" }, APP_ORIGIN);   // the app can also reach us without this (it pings the tab it opened)
@@ -943,11 +943,18 @@
       p.style.cssText = "position:fixed;right:16px;bottom:16px;width:400px;z-index:2147483647;background:#111827;color:#fff;font:13px system-ui;padding:14px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.45)";
       var btn = "background:#4f46e5;color:#fff;border:0;border-radius:8px;padding:6px 12px;margin:6px 6px 0 0;cursor:pointer", ta = "width:100%;height:56px;box-sizing:border-box;background:#0b1020;color:#e5e7eb;border:1px solid #374151;border-radius:8px;margin-top:6px;font:11px monospace";
       p.innerHTML = '<b>JiraTime agent</b><span id="jt-x" style="float:right;cursor:pointer">✕</span><div id="jt-msg" style="margin:8px 0;opacity:.92"></div>' +
+        '<button id="jt-open" style="' + btn + ';background:#16a34a;font-weight:600">↗ Open JiraTime (connected)</button>' +
+        '<details style="margin-top:8px"><summary style="cursor:pointer;opacity:.8">Manual copy/paste mode</summary>' +
         '<textarea id="jt-in" placeholder="Paste the request here (Ctrl+V)" style="' + ta + '"></textarea>' +
         '<button id="jt-read" style="' + btn + '">Read clipboard</button><button id="jt-run" style="' + btn + '" disabled>Run</button>' +
-        '<textarea id="jt-out" readonly placeholder="Result appears here" style="' + ta + '"></textarea><button id="jt-copy" style="' + btn + '">Copy result</button>';
+        '<textarea id="jt-out" readonly placeholder="Result appears here" style="' + ta + '"></textarea><button id="jt-copy" style="' + btn + '">Copy result</button></details>';
       document.body.appendChild(p);
       p.querySelector("#jt-x").onclick = function () { p.remove(); };
+      p.querySelector("#jt-open").onclick = function () {
+        var w = window.open(APP_ORIGIN + "/#newersworld", "_blank");     // the new JiraTime tab has THIS tab as its opener
+        if (!w) setMsg("Pop-up blocked — allow pop-ups for newersworld.tothenew.com and click again.");
+        else setMsg("JiraTime opened. Waiting for it to connect…");
+      };
       p.querySelector("#jt-read").onclick = function () { navigator.clipboard.readText().then(loadReq).catch(function () { setMsg("Clipboard blocked — paste into the box instead (Ctrl+V)."); }); };
       p.querySelector("#jt-in").addEventListener("input", function (e) { loadReq(e.target.value); });
       p.querySelector("#jt-run").onclick = runPending;
@@ -981,7 +988,10 @@
 
   window.addEventListener("message", function (e) {
     if (e.origin !== APP_ORIGIN || !e.data || !e.source) return;
-    if (e.data.jt === "req") st.acked = true;      // the app is talking to us, so the link works
+    if (e.data.jt === "req" && !st.acked) {        // the app is talking to us, so the link works
+      st.acked = true; say("JiraTime agent connected ✓ (" + host + ")");
+      var pn = document.getElementById("jt-panel"); if (pn && !pendingReq) pn.remove();
+    }
     if (e.data.jt === "ack") { if (!st.acked) { st.acked = true; say("JiraTime agent connected ✓ (" + host + ")"); } return; }
     if (e.data.jt !== "req") return;
     var id = e.data.id, msg = e.data.msg || {};
