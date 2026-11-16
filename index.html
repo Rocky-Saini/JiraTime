@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JiraTime</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<aside class="sidebar">
+  <div class="logo"><span class="logo-dot"></span>JiraTime</div>
+  <nav>
+    <button class="nav active" data-view="dashboard">📅 Calendar &amp; Bulk</button>
+    <button class="nav" data-view="weekly">🗓 Weekly grid</button>
+    <button class="nav" data-view="fields">📝 Issue fields</button>
+    <button class="nav" data-view="reports">📊 Reports</button>
+    <button class="nav" data-view="history">🕘 History &amp; Undo</button>
+    <button class="nav" data-view="settings">⚙️ Settings</button>
+  </nav>
+  <div class="side-foot"><button class="nav nwnav" data-view="nw">🏢 NewersWorld Timesheet</button><button id="themeBtn" class="ghost">🌗 Theme</button></div>
+</aside>
+
+<main>
+  <header class="topbar">
+    <div id="conn" class="pill warn">Checking Jira…</div>
+    <button id="syncBtn" class="small ghost" title="Refresh from Jira">⟳ Refresh</button>
+    <span id="syncInfo" class="muted tiny"></span>
+    <div class="grow"></div>
+    <div id="user" class="muted"></div>
+  </header>
+
+  <!-- DASHBOARD -->
+  <section id="view-dashboard" class="view active">
+    <div id="banner" class="banner hidden"></div>
+    <div class="stats" id="stats"></div>
+    <div class="progress"><div id="progressBar"></div></div>
+
+    <div class="grid2">
+      <div class="card">
+        <div class="cal-head">
+          <button id="prevM" class="ghost">‹</button>
+          <select id="monthSel"></select>
+          <input id="yearSel" type="number" min="2000" max="2100">
+          <button id="nextM" class="ghost">›</button>
+          <button id="todayM" class="ghost">Today</button>
+        </div>
+        <div class="quick">
+          <button id="selWeekdays" class="small">Select all working days</button>
+          <button id="selMissing" class="small">Select missing days</button>
+          <button id="balance" class="small">⚖ Balance partial days</button>
+          <button id="clearSel" class="small">Clear</button>
+          <span class="muted tiny">Click = toggle · Shift+click = range</span>
+        </div>
+        <div id="calendar" class="calendar"></div>
+        <div class="legend">
+          <span><i class="lg done"></i>Complete</span>
+          <span><i class="lg partial"></i>Partial</span>
+          <span><i class="lg missing"></i>Missing</span>
+          <span><i class="lg holiday"></i>Holiday / leave</span>
+          <span><i class="lg failed"></i>Failed (session)</span>
+          <span><i class="lg sel"></i>Selected</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Worklog configuration</h3>
+        <div id="suggest" class="suggest hidden"></div>
+        <div class="row-actions">
+          <select id="tplSel"><option value="">Templates…</option></select>
+          <button id="tplSave" class="small">Save template</button>
+          <select id="planSel"><option value="">Monthly plans…</option></select>
+          <button id="planSave" class="small">Save as plan</button>
+        </div>
+        <div id="pinned" class="chips pinned"></div>
+        <div id="rows"></div>
+        <div class="row-actions">
+          <button id="addRow" class="small">＋ Add another issue</button>
+          <button id="copyPrev" class="small">Copy previous month</button>
+        </div>
+
+        <div class="field-row">
+          <label>Start time <input id="startTime" type="time" value="10:00"></label>
+          <label>If worklog already exists
+            <select id="dupMode">
+              <option value="skip">Skip existing (default)</option>
+              <option value="add">Add additional hours</option>
+            </select>
+          </label>
+        </div>
+
+        <h4>Selected dates <span id="selCount" class="muted"></span></h4>
+        <div id="selDates" class="chips"></div>
+        <div class="summary" id="summary"></div>
+        <div class="two">
+          <button id="fillMonth" class="primary alt">⚡ Fill my month</button>
+          <button id="previewBtn" class="primary">Preview &amp; submit</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- WEEKLY -->
+  <section id="view-weekly" class="view">
+    <div class="card">
+      <div class="row-actions">
+        <button id="wPrev" class="ghost">‹</button>
+        <h3 id="wTitle" style="margin:0"></h3>
+        <button id="wNext" class="ghost">›</button>
+        <button id="wToday" class="small">This week</button>
+        <div class="grow"></div>
+        <div class="searchbox"><input id="wAdd" placeholder="＋ Add issue to grid…"><div id="wAddRes" class="results hidden"></div></div>
+        <button id="wCopy" class="small">Copy last week</button>
+        <button id="wGo" class="primary" style="width:auto;margin:0">Review &amp; submit</button>
+      </div>
+      <div class="scroll"><table id="wTable" class="wtable"></table></div>
+      <p class="muted tiny">Grey = already logged in Jira. Type hours (e.g. 2, 1.5h, 90m) in a cell to add more.</p>
+    </div>
+  </section>
+
+  <!-- NEWERSWORLD -->
+  <section id="view-nw" class="view">
+    <div class="card">
+      <div class="row-actions">
+        <h3 style="margin:0">NewersWorld timesheet ⇄ Jira</h3>
+        <span id="nwBridge" class="pill warn">Agent not connected</span>
+        <div class="grow"></div>
+        <button id="nwLeave" class="small">Import leave only</button>
+      </div>
+      <p class="muted tiny">Jira worklogs are the source. Days that are already filled, on leave, or locked in NewersWorld are never touched (unless you allow overwrite). Your NewersWorld login in the browser is used — nothing is stored here.</p>
+      <div id="nwSetup" class="warnbox">
+        <b>Connect (takes 10 seconds):</b>
+        <ol style="margin:6px 0 0;padding-left:20px">
+          <li>Click <button id="nwOpen" class="small">↗ Open NewersWorld</button> (opens your timesheet in a new tab, you are already logged in there).</li>
+          <li>In that tab click the bookmark <b>JiraTime Agent</b>. First time only: drag <a id="nwBm" class="bm" href="#" draggable="true" title="Drag me to the bookmarks bar (Ctrl+Shift+B)">⭐ JiraTime Agent</a> to your bookmarks bar.</li>
+          <li>Come back here. The badge turns green. <button id="nwCopy" class="small">Copy script</button> <span class="muted tiny">(alternative: paste it in that tab's DevTools console)</span></li>
+        </ol>
+      </div>
+      <div class="field-row">
+        <label>From <input id="nwFrom" type="date"></label>
+        <label>To (till today) <input id="nwTo" type="date"></label>
+        <label>NewersWorld task <select id="nwTask"><option value="">(read first)</option></select></label>
+        <label>Hours
+          <select id="nwHours"><option value="jira">Use Jira hours</option><option value="target">Fill to daily target</option></select>
+        </label>
+      </div>
+      <div class="row-actions" style="margin-top:12px">
+        <label class="check"><input id="nwComments" type="checkbox"> Include Jira comments in description</label>
+        <label class="check"><input id="nwOverwrite" type="checkbox"> Overwrite filled days that differ</label>
+      </div>
+      <div class="two">
+        <button id="nwRead" class="primary alt">1 · Read NewersWorld &amp; compare</button>
+        <button id="nwSync" class="primary" disabled>2 · Sync till today</button>
+      </div>
+      <div id="nwSummary" class="summary"></div>
+      <div class="scroll" style="max-height:52vh"><table id="nwTable"></table></div>
+      <div id="nwResult"></div>
+    </div>
+  </section>
+
+  <!-- ISSUE FIELDS -->
+  <section id="view-fields" class="view">
+    <div class="card">
+      <div class="row-actions">
+        <h3 style="margin:0">Issue fields</h3>
+        <div class="searchbox"><input id="fdSearch" placeholder="Search issue to edit…"><div id="fdRes" class="results hidden"></div></div>
+        <span id="fdIssue" class="muted"></span>
+        <div class="grow"></div>
+        <select id="fdPreset"><option value="">Presets…</option></select>
+        <button id="fdPresetSave" class="small">Save changes as preset</button>
+        <button id="fdDates" class="small">📅 Dev dates from my worklogs</button>
+      </div>
+      <p class="muted tiny">Set Original estimate, Actual Dev start/end, and AI usage in one place. Only the fields you change are sent to Jira.</p>
+      <div id="fdForm" class="fdform"><p class="muted">Search and pick an issue.</p></div>
+      <div class="row-actions" style="margin-top:14px">
+        <select id="fdAdd"><option value="">＋ Add another field…</option></select>
+        <div class="grow"></div>
+        <span id="fdCount" class="muted"></span>
+        <button id="fdBulk" class="small" disabled>Apply to other issues…</button>
+        <button id="fdSave" class="primary" style="width:auto;margin:0" disabled>Save changes</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- REPORTS -->
+  <section id="view-reports" class="view">
+    <div class="card">
+      <div class="row-actions">
+        <h3 id="repTitle" style="margin:0"></h3><div class="grow"></div>
+        <button id="repPrint" class="small">🖨 Timesheet (print / PDF)</button>
+        <button id="repCsv" class="small">Export CSV</button>
+      </div>
+      <h4>Hours per day</h4><div id="repDays" class="daybars"></div>
+      <div class="grid2e">
+        <div><h4>By issue</h4><div id="repIssues"></div></div>
+        <div><h4>By project</h4><div id="repProjects"></div><h4>By week</h4><div id="repWeeks"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HISTORY -->
+  <section id="view-history" class="view">
+    <div class="card">
+      <h3>Recent batches</h3>
+      <div id="batches"></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="row-actions">
+        <input id="histFilter" placeholder="Filter by issue key…">
+        <select id="histStatus"><option value="">All</option><option>success</option><option>failed</option></select>
+        <div class="grow"></div>
+        <button id="histCsv" class="small">Export CSV</button>
+        <button id="histClear" class="small danger">Clear</button>
+      </div>
+      <table id="histTable"></table>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="view-settings" class="view">
+    <div class="grid2e">
+      <div class="card">
+        <h3>General</h3>
+        <div class="form">
+          <div class="row-actions"><button id="setReconnect" class="small">Change Jira account / token</button><button id="setLogout" class="small danger">Remove saved credentials</button></div>
+          <label>Daily target hours <input id="setTarget" type="number" min="1" max="24" step="0.5"></label>
+          <label>Default duration <input id="setDur" placeholder="2h"></label>
+          <label>Default start time <input id="setStart" type="time"></label>
+          <label>Delay between requests (ms) <input id="setDelay" type="number" min="100" max="5000" step="100"></label>
+          <label class="check"><input id="setWeekend" type="checkbox"> Allow selecting Saturday &amp; Sunday</label>
+          <button id="setSave" class="primary">Save settings</button>
+        </div>
+        <p class="muted tiny">Your API token is kept only in the local .env file (never sent to the browser).</p>
+        <h4>Saved monthly plans</h4><div id="planList"></div>
+      </div>
+      <div class="card">
+        <h3>Holidays &amp; leave</h3>
+        <p class="muted tiny">These dates are skipped everywhere (calendar, Fill my month, weekly grid).</p>
+        <div class="row-actions">
+          <input id="hDate" type="date"><input id="hLabel" placeholder="Label (Diwali, Leave…)">
+          <select id="hType"><option value="holiday">Holiday</option><option value="leave">Leave</option></select>
+          <button id="hAdd" class="small">Add</button>
+        </div>
+        <div class="row-actions"><input id="hFrom" type="date"><span class="muted">to</span><input id="hTo" type="date">
+          <select id="hType2"><option value="leave">Leave</option><option value="holiday">Holiday</option></select><button id="hAddRange" class="small">Add range</button></div>
+        <div id="holList"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="modal" class="modal hidden"><div class="modal-box" id="modalBox"></div></div>
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+<script src="nw.js"></script>
+<script src="fields.js"></script>
+</body>
+</html>

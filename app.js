@@ -1,0 +1,855 @@
+"use strict";
+/* JiraTime - bulk worklog filler (web UI). Talks to the local server.js proxy;
+   Jira credentials never reach the browser. */
+
+// ================= helpers =================
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const pad = (n) => String(n).padStart(2, "0");
+const ymd = (y, m, d) => `${y}-${pad(m + 1)}-${pad(d)}`;
+const ymdOf = (t) => ymd(t.getFullYear(), t.getMonth(), t.getDate());
+const monthKey = (y, m) => `${y}-${pad(m + 1)}`;
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const fmtH = (sec) => (Math.round((sec / 3600) * 100) / 100) + "h";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const uid = () => Math.random().toString(36).slice(2, 9);
+const isWeekend = (s) => { const d = new Date(s + "T00:00:00").getDay(); return d === 0 || d === 6; };
+const prettyDate = (s) => { const [y, m, d] = s.split("-"); return `${d}-${MONTHS[+m - 1].slice(0, 3)}-${y}`; };
+const todayStr = () => ymdOf(new Date());
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const mondayOf = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); x.setHours(0, 0, 0, 0); return x; };
+
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.remove("hidden"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.add("hidden"), 3500); }
+function openModal(html) { $("#modalBox").innerHTML = html; $("#modal").classList.remove("hidden"); }
+function closeModal() { $("#modal").classList.add("hidden"); }
+const modalOpen = () => !$("#modal").classList.contains("hidden");
+
+/** "2h", "1h 30m", "90m", "1.5h", "2" (hours) -> seconds (0 if invalid) */
+function parseDuration(str) {
+  let s = String(str || "").trim().toLowerCase();
+  if (/^\d+(\.\d+)?$/.test(s)) s += "h";
+  const m = s.match(/^(?:(\d+(?:\.\d+)?)\s*h)?\s*(?:(\d+)\s*m)?$/);
+  if (!m || (!m[1] && !m[2])) return 0;
+  return Math.round(parseFloat(m[1] || 0) * 3600 + parseInt(m[2] || 0, 10) * 60);
+}
+function secsToDur(secs) {
+  const h = Math.floor(secs / 3600), m = Math.round((secs % 3600) / 60);
+  return `${h ? h + "h" : ""}${h && m ? " " : ""}${m ? m + "m" : ""}` || "0m";
+}
+
+const store = {
+  get: async (k, d) => { try { const v = localStorage.getItem("jiratime." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set: async (k, v) => localStorage.setItem("jiratime." + k, JSON.stringify(v)),
+};
+const csv = (rows) => rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+function download(name, text) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+  a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+
+// ================= state =================
+const DEFAULTS = { target: 8, duration: "2h", start: "10:00", delay: 500, weekend: false, dup: "skip" };
+const S = {
+  settings: { ...DEFAULTS }, me: null, base: null, email: null,
+  y: new Date().getFullYear(), m: new Date().getMonth(),
+  selected: new Set(), lastClicked: null,
+  rows: [], months: {}, failed: new Set(),
+  templates: [], plans: [], holidays: {}, pinned: [], comments: [], history: [],
+  week: mondayOf(new Date()), weekInputs: {}, weekComments: {}, weekIssues: [],
+  lastSync: 0, prevPattern: null,
+};
+
+// ================= Jira API adapter =================
+const API = {
+  myself: () => "/rest/api/3/myself",
+  picker: (q) => `/rest/api/2/issue/picker?query=${encodeURIComponent(q)}&showSubTasks=true&currentJQL=${encodeURIComponent('project in projectsWhereUserHasPermission("WORK ON ISSUES")')}`,
+  jql: (jql, token) => `/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=100&fields=summary${token ? "&nextPageToken=" + encodeURIComponent(token) : ""}`,
+  issueWorklogs: (id) => `/rest/api/2/issue/${id}/worklog?startAt=0&maxResults=5000`,
+  addWorklog: (id) => `/rest/api/2/issue/${id}/worklog?adjustEstimate=leave`,
+  delWorklog: (id, wid) => `/rest/api/2/issue/${id}/worklog/${wid}?adjustEstimate=leave`,
+};
+class ApiError extends Error { constructor(msg, status) { super(msg); this.status = status; } }
+
+async function jira(path, opts = {}) {
+  let res;
+  try {
+    res = await fetch("/jira" + path, { ...opts, headers: { Accept: "application/json", ...(opts.body ? { "Content-Type": "application/json" } : {}) } });
+  } catch (e) { const err = new ApiError("Network error: " + e.message, 0); err.uncertain = true; throw err; }
+  if (res.status === 412) throw new ApiError("Jira not configured", 412);
+  if (res.status === 401) throw new ApiError("Jira rejected the credentials (API token invalid or revoked)", 401);
+  if (!res.ok) {
+    let msg = res.status + " " + res.statusText;
+    try { const j = await res.json(); msg = [...(j.errorMessages || []), ...Object.values(j.errors || {}), j.error].filter(Boolean).join("; ") || msg; } catch { /* ignore */ }
+    throw new ApiError(msg, res.status);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+function setupDialog(message) {
+  openModal(`
+    <h3>Connect Jira</h3>
+    <p class="muted">${esc(message || "Create an API token at id.atlassian.com → Security → API tokens. It is stored only in the local .env file on this computer.")}</p>
+    <div class="form">
+      <label>Jira site URL <input id="suBase" placeholder="https://yourcompany.atlassian.net" value="${esc(S.base || "")}"></label>
+      <label>Atlassian email <input id="suEmail" type="email" value="${esc(S.email || "")}"></label>
+      <label>API token <input id="suToken" type="password" autocomplete="off"></label>
+      <p id="suErr" class="st-failed"></p>
+    </div>
+    <div class="foot"><button id="suCancel">Cancel</button><button id="suGo" class="primary">Connect</button></div>`);
+  $("#suCancel").onclick = closeModal;
+  $("#suGo").onclick = async () => {
+    $("#suErr").textContent = "";
+    const r = await fetch("/api/setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ base: $("#suBase").value, email: $("#suEmail").value, token: $("#suToken").value }) });
+    const j = await r.json();
+    if (!r.ok) { $("#suErr").textContent = j.error; return; }
+    closeModal(); S.months = {}; toast("Connected"); boot();
+  };
+}
+
+async function checkConnection() {
+  const el = $("#conn");
+  const st = await fetch("/api/status").then((r) => r.json()).catch(() => ({}));
+  S.base = st.base; S.email = st.email;
+  try {
+    if (!st.configured) throw new ApiError("Jira not configured", 412);
+    S.me = await jira(API.myself());
+    el.className = "pill ok"; el.textContent = "● Jira connected";
+    $("#user").textContent = S.me.displayName;
+    return true;
+  } catch (e) {
+    S.me = null; el.className = "pill bad";
+    el.innerHTML = `● ${esc(e.status === 412 ? "Not connected" : e.message)} — <a href="#" id="connectLink">connect Jira</a>`;
+    $("#connectLink").addEventListener("click", (ev) => { ev.preventDefault(); setupDialog(); });
+    if (e.status === 412) setupDialog();
+    return false;
+  }
+}
+
+// ================= worklog data =================
+async function loadMonth(y, m, force = false) {
+  const key = monthKey(y, m);
+  if (!force && S.months[key]) return S.months[key];
+  const data = { byDate: {}, byIssue: {}, issues: {} };
+  if (!S.me) return (S.months[key] = data);
+  const last = new Date(y, m + 1, 0).getDate();
+  const from = ymd(y, m, 1), to = ymd(y, m, last);
+  const jql = `worklogAuthor = currentUser() AND worklogDate >= "${from}" AND worklogDate <= "${to}"`;
+  const issues = []; let token = null;
+  do {
+    const r = await jira(API.jql(jql, token));
+    issues.push(...(r.issues || [])); token = r.nextPageToken || null;
+  } while (token && issues.length < 500);
+  for (const is of issues) {
+    data.issues[is.id] = { id: is.id, key: is.key, summary: is.fields?.summary || "" };
+    const wl = await jira(API.issueWorklogs(is.id));
+    for (const w of wl.worklogs || []) {
+      if (w.author?.accountId !== S.me.accountId) continue;
+      const date = String(w.started).slice(0, 10);
+      if (date < from || date > to) continue;
+      const entry = { id: w.id, issueId: is.id, issueKey: is.key, secs: w.timeSpentSeconds, comment: typeof w.comment === "string" ? w.comment : "", author: w.author.displayName, date };
+      (data.byDate[date] ||= { secs: 0, entries: [] }).secs += entry.secs;
+      data.byDate[date].entries.push(entry);
+      ((data.byIssue[is.id] ||= {})[date] ||= []).push(entry);
+    }
+  }
+  return (S.months[key] = data);
+}
+async function ensureRange(fromStr, toStr) {
+  const a = new Date(fromStr + "T00:00:00"), b = new Date(toStr + "T00:00:00");
+  for (let t = new Date(a.getFullYear(), a.getMonth(), 1); t <= b; t.setMonth(t.getMonth() + 1)) await loadMonth(t.getFullYear(), t.getMonth());
+}
+const monthData = (date) => S.months[date.slice(0, 7)] || { byDate: {}, byIssue: {}, issues: {} };
+const existingFor = (issueId, date) => monthData(date).byIssue?.[issueId]?.[date] || [];
+const loggedSecs = (issueId, date) => existingFor(issueId, date).reduce((a, e) => a + e.secs, 0);
+
+async function refreshNow(silent) {
+  if (!S.me) return;
+  try {
+    S.months = {};
+    await loadMonth(S.y, S.m, true);
+    S.lastSync = Date.now();
+    renderAll();
+    if (!silent) toast("Synced with Jira");
+  } catch (e) { if (!silent) toast("Sync failed: " + e.message); }
+  updateSyncInfo();
+}
+function updateSyncInfo() { $("#syncInfo").textContent = S.lastSync ? "synced " + new Date(S.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""; }
+
+// ================= days / holidays =================
+const holidayOf = (d) => S.holidays[d];
+const isOffDay = (d) => (!S.settings.weekend && isWeekend(d)) || !!holidayOf(d);
+function workingDays(y, m) {
+  const out = [], last = new Date(y, m + 1, 0).getDate();
+  for (let d = 1; d <= last; d++) { const s = ymd(y, m, d); if (!isOffDay(s)) out.push(s); }
+  return out;
+}
+function dayStatus(date, data) {
+  if (holidayOf(date)) return "holiday";
+  const secs = data.byDate[date]?.secs || 0, target = S.settings.target * 3600;
+  if (secs >= target) return "done";
+  if (secs > 0) return "partial";
+  return date < todayStr() && !isWeekend(date) ? "missing" : "";
+}
+
+// ================= calendar =================
+function renderCalendar() {
+  const data = S.months[monthKey(S.y, S.m)] || { byDate: {}, byIssue: {} };
+  $("#monthSel").value = S.m; $("#yearSel").value = S.y;
+  const first = (new Date(S.y, S.m, 1).getDay() + 6) % 7, last = new Date(S.y, S.m + 1, 0).getDate();
+  let html = DOW.map((d) => `<div class="dow">${d}</div>`).join("") + '<div class="day empty"></div>'.repeat(first);
+  for (let d = 1; d <= last; d++) {
+    const s = ymd(S.y, S.m, d), off = isOffDay(s), st = dayStatus(s, data), hol = holidayOf(s);
+    const failed = [...S.failed].some((k) => k.endsWith("|" + s));
+    const secs = data.byDate[s]?.secs || 0;
+    const cls = ["day", off && "off", S.selected.has(s) && "selected", !S.selected.has(s) && st, failed && "failed", s === todayStr() && "today"].filter(Boolean).join(" ");
+    html += `<div class="${cls}" data-d="${s}" ${hol ? `title="${esc(hol.label)}"` : ""}><span class="n">${d}</span><span class="h">${hol ? "🏖 " + esc(hol.label).slice(0, 8) : secs ? fmtH(secs) : ""}</span></div>`;
+  }
+  $("#calendar").innerHTML = html;
+  renderStats(data); renderBanner(data); renderSelection();
+}
+
+function renderStats(data) {
+  const wd = workingDays(S.y, S.m);
+  let done = 0, partial = 0, total = 0;
+  for (const d of wd) { const st = dayStatus(d, data); if (st === "done") done++; if (st === "partial") partial++; }
+  for (const d of Object.values(data.byDate)) total += d.secs;
+  const failedCount = [...S.failed].filter((k) => k.split("|")[1].startsWith(monthKey(S.y, S.m))).length;
+  const remaining = Math.max(0, wd.length * S.settings.target * 3600 - total);
+  $("#stats").innerHTML = [["Working days", wd.length], ["Completed", done], ["Partial", partial], ["Pending", wd.length - done - partial], ["Failed (session)", failedCount], ["Total logged", fmtH(total)], ["Remaining", fmtH(remaining)]]
+    .map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
+  $("#progressBar").style.width = (wd.length ? Math.round(((done + partial * 0.5) / wd.length) * 100) : 0) + "%";
+}
+
+function missingDays() {
+  const data = S.months[monthKey(S.y, S.m)] || { byDate: {} };
+  return workingDays(S.y, S.m).filter((d) => d <= todayStr() && !data.byDate[d]);
+}
+function renderBanner(data) {
+  const b = $("#banner");
+  const missing = S.me && monthKey(S.y, S.m) <= todayStr().slice(0, 7) ? missingDays() : [];
+  if (!missing.length) { b.classList.add("hidden"); return; }
+  b.classList.remove("hidden");
+  b.innerHTML = `⚠ <b>${missing.length}</b> working day${missing.length > 1 ? "s" : ""} in ${MONTHS[S.m]} ha${missing.length > 1 ? "ve" : "s"} no worklog. <button id="bnSel" class="small">Select missing days</button> <button id="bnFill" class="small">⚡ Fill my month</button>`;
+  $("#bnSel").onclick = () => { missing.forEach((d) => S.selected.add(d)); renderCalendar(); };
+  $("#bnFill").onclick = fillMonth;
+}
+
+const sortedSelected = () => [...S.selected].sort();
+function renderSelection() {
+  const dates = sortedSelected();
+  $("#selCount").textContent = `(${dates.length})`;
+  $("#selDates").innerHTML = dates.map((d) => `<span class="chip">${prettyDate(d)}</span>`).join("") || '<span class="muted">Click dates on the calendar</span>';
+  const valid = S.rows.filter((r) => r.issue && parseDuration(r.duration));
+  const perDay = valid.reduce((a, r) => a + parseDuration(r.duration), 0);
+  $("#summary").innerHTML = `<b>${dates.length}</b> dates × <b>${valid.length}</b> issue(s) = <b>${dates.length * valid.length}</b> entries · <b>${fmtH(perDay * dates.length)}</b> total`;
+  $("#previewBtn").disabled = !dates.length || !valid.length || !S.me;
+  $("#fillMonth").disabled = !valid.length && !S.plans.length || !S.me;
+}
+
+function toggleDate(d, shift) {
+  if (isOffDay(d)) return;
+  if (shift && S.lastClicked) {
+    const [a, b] = [S.lastClicked, d].sort();
+    for (let t = new Date(a + "T00:00:00"); ymdOf(t) <= b; t.setDate(t.getDate() + 1)) { const s = ymdOf(t); if (!isOffDay(s)) S.selected.add(s); }
+  } else S.selected.has(d) ? S.selected.delete(d) : S.selected.add(d);
+  S.lastClicked = d; renderCalendar();
+}
+
+async function gotoMonth(y, m) {
+  const dt = new Date(y, m, 1); S.y = dt.getFullYear(); S.m = dt.getMonth();
+  renderCalendar();
+  try { await loadMonth(S.y, S.m); S.lastSync = Date.now(); updateSyncInfo(); } catch (e) { toast("Could not load worklogs: " + e.message); if (e.status === 401) checkConnection(); }
+  renderCalendar(); loadSuggestion();
+}
+function renderAll() {
+  renderCalendar(); renderSuggestion();
+  const v = document.querySelector(".nav.active")?.dataset.view;
+  if (v === "weekly") renderWeekly(); if (v === "reports") renderReports(); if (v === "history") renderHistory();
+}
+
+// ================= issue search (shared) =================
+function attachIssueSearch(input, resDiv, onPick) {
+  let timer;
+  const search = async () => {
+    try {
+      const q = input.value.trim();
+      const r = await jira(API.picker(q));
+      let issues = (r.sections || []).flatMap((s) => s.issues || []).slice(0, 25).map((i) => ({ id: String(i.id), key: i.key, summary: i.summaryText || i.summary }));
+      const pins = !q ? S.pinned : S.pinned.filter((p) => (p.key + p.summary).toLowerCase().includes(q.toLowerCase()));
+      issues = [...pins.map((p) => ({ ...p, pin: true })), ...issues.filter((i) => !pins.some((p) => p.id === i.id))];
+      resDiv.innerHTML = issues.map((i) => `<div data-id="${i.id}" data-key="${esc(i.key)}" data-sum="${esc(i.summary)}">${i.pin ? "★ " : ""}${esc(i.key)} <small>${esc(i.summary)}</small></div>`).join("") || '<div class="muted">No issues</div>';
+      resDiv.classList.remove("hidden");
+    } catch (e) { resDiv.innerHTML = `<div class="muted">${esc(e.message)}</div>`; resDiv.classList.remove("hidden"); }
+  };
+  input.addEventListener("focus", () => { input.select(); search(); });
+  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 250); });
+  input.addEventListener("keydown", (e) => { if (e.key === "Escape") { resDiv.classList.add("hidden"); input.blur(); } });
+  input.addEventListener("blur", () => setTimeout(() => resDiv.classList.add("hidden"), 200));
+  resDiv.addEventListener("mousedown", (e) => {
+    const d = e.target.closest("[data-id]"); if (!d) return;
+    resDiv.classList.add("hidden"); input.blur();
+    onPick({ id: d.dataset.id, key: d.dataset.key, summary: d.dataset.sum });
+  });
+}
+
+const isPinned = (id) => S.pinned.some((p) => p.id === String(id));
+async function togglePin(issue) {
+  S.pinned = isPinned(issue.id) ? S.pinned.filter((p) => p.id !== String(issue.id)) : [...S.pinned, { id: String(issue.id), key: issue.key, summary: issue.summary }];
+  await store.set("pinned", S.pinned); renderPinned(); renderRows();
+}
+function renderPinned() {
+  $("#pinned").innerHTML = S.pinned.length ? '<span class="muted tiny">Pinned:</span>' + S.pinned.map((p) => `<span class="chip pin" data-id="${p.id}" title="${esc(p.summary)}">★ ${esc(p.key)}</span>`).join("") : '<span class="muted tiny">Tip: pin frequently used issues with ☆ so they appear here.</span>';
+}
+
+/** Comments previously used for an issue (history + loaded months), then global ones. */
+function commentsFor(issueId) {
+  const out = [];
+  const add = (c) => { if (c && !out.includes(c)) out.push(c); };
+  S.history.filter((h) => h.issueId === String(issueId) && h.status === "success").forEach((h) => add(h.comment));
+  Object.values(S.months).forEach((md) => Object.values(md.byIssue?.[issueId] || {}).flat().forEach((e) => add(e.comment)));
+  S.comments.forEach(add);
+  return out.slice(0, 15);
+}
+
+// ================= issue rows =================
+const newRow = (p = {}) => ({ id: uid(), issue: null, duration: S.settings.duration, comment: "", ...p });
+
+function renderRows() {
+  const wrap = $("#rows");
+  wrap.innerHTML = S.rows.map((r) => `
+    <div class="irow" data-id="${r.id}">
+      <input class="q" placeholder="Search issue key / summary / project" value="${esc(r.issue ? r.issue.key + " — " + r.issue.summary : "")}">
+      <input class="dur" value="${esc(r.duration)}" title="e.g. 2h, 1h 30m">
+      <button class="rm" title="Remove">✕</button>
+      <input class="cmt full" list="cmt-${r.id}" placeholder="Comment" value="${esc(r.comment)}">
+      <datalist id="cmt-${r.id}">${(r.issue ? commentsFor(r.issue.id) : S.comments).map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
+      <div class="full qd">${["1h", "2h", "3h", "4h", "6h", "8h"].map((d) => `<button type="button" class="small ${r.duration === d ? "on" : ""}" data-d="${d}">${d}</button>`).join("")}
+        ${r.issue ? `<button type="button" class="small fldbtn">📝 Fields</button><button type="button" class="small pinbtn">${isPinned(r.issue.id) ? "★ Pinned" : "☆ Pin"}</button>` : ""}</div>
+      <div class="results hidden"></div>
+    </div>`).join("");
+  wrap.querySelectorAll(".irow").forEach((el) => {
+    const row = S.rows.find((r) => r.id === el.dataset.id);
+    const q = $(".q", el), dur = $(".dur", el);
+    const syncChips = () => el.querySelectorAll(".qd [data-d]").forEach((x) => x.classList.toggle("on", x.dataset.d === row.duration.trim()));
+    dur.addEventListener("input", () => { row.duration = dur.value; dur.style.borderColor = parseDuration(row.duration) ? "" : "var(--bad)"; syncChips(); renderSelection(); });
+    el.querySelectorAll(".qd [data-d]").forEach((b) => b.addEventListener("click", () => { row.duration = b.dataset.d; dur.value = row.duration; dur.style.borderColor = ""; syncChips(); renderSelection(); }));
+    $(".cmt", el).addEventListener("input", (e) => { row.comment = e.target.value; });
+    $(".rm", el).addEventListener("click", () => { S.rows = S.rows.filter((r) => r !== row); if (!S.rows.length) S.rows.push(newRow()); renderRows(); renderSelection(); });
+    $(".pinbtn", el)?.addEventListener("click", () => togglePin(row.issue));
+    $(".fldbtn", el)?.addEventListener("click", () => window.openIssueFields?.(row.issue));
+    attachIssueSearch(q, $(".results", el), (issue) => { row.issue = issue; renderRows(); renderSelection(); renderSuggestion(); });
+  });
+}
+
+function setRowIssue(issue) {
+  let row = S.rows.find((r) => !r.issue);
+  if (!row) { row = newRow(); S.rows.push(row); }
+  row.issue = issue; renderRows(); renderSelection(); renderSuggestion();
+}
+
+// ================= templates / plans =================
+function renderTemplates() {
+  $("#tplSel").innerHTML = '<option value="">Templates…</option>' + S.templates.map((t, i) => `<option value="${i}">${esc(t.name)}</option>`).join("");
+  $("#planSel").innerHTML = '<option value="">Monthly plans…</option>' + S.plans.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join("");
+  $("#planList").innerHTML = S.plans.map((p, i) => `<div class="li"><span>${esc(p.name)} <small class="muted">${p.rows.map((r) => esc(r.issue.key) + " " + esc(r.duration)).join(", ")}</small></span><button class="small danger" data-delplan="${i}">Delete</button></div>`).join("") || '<p class="muted tiny">No plans yet. Configure rows on the calendar page and click "Save as plan".</p>';
+}
+const loadPlanRows = (plan) => { S.rows = plan.rows.map((r) => newRow({ issue: r.issue, duration: r.duration, comment: r.comment })); renderRows(); renderSelection(); };
+
+// ================= jobs / preview =================
+function makeJob(issue, date, duration, comment, include) {
+  const existing = existingFor(issue.id, date);
+  return { id: uid(), issue, date, duration, comment: (comment || "").trim(), existing, include: include ?? (!existing.length || $("#dupMode").value === "add"), status: "pending", error: "" };
+}
+function buildJobs() {
+  const jobs = [];
+  for (const date of sortedSelected()) for (const r of S.rows) if (r.issue && parseDuration(r.duration)) jobs.push(makeJob(r.issue, date, r.duration, r.comment));
+  return jobs;
+}
+
+/** Sanity checks shown before submit (anomaly detection). */
+function warningsFor(jobs) {
+  const w = [], inc = jobs.filter((j) => j.include);
+  const perDate = {};
+  inc.forEach((j) => { perDate[j.date] = (perDate[j.date] || 0) + parseDuration(j.duration); });
+  for (const [d, secs] of Object.entries(perDate)) {
+    const already = monthData(d).byDate[d]?.secs || 0;
+    if (secs + already > 12 * 3600) w.push(`${prettyDate(d)}: total would be ${fmtH(secs + already)} (more than 12h).`);
+    else if (secs + already > S.settings.target * 3600) w.push(`${prettyDate(d)}: total ${fmtH(secs + already)} exceeds your ${S.settings.target}h daily target.`);
+    if (isWeekend(d)) w.push(`${prettyDate(d)} is a weekend.`);
+    if (holidayOf(d)) w.push(`${prettyDate(d)} is marked as ${holidayOf(d).type} (${holidayOf(d).label}).`);
+    if (d > todayStr()) w.push(`${prettyDate(d)} is in the future.`);
+  }
+  const noCmt = inc.filter((j) => !j.comment).length;
+  if (noCmt) w.push(`${noCmt} entr${noCmt > 1 ? "ies have" : "y has"} no comment.`);
+  const dup = inc.filter((j) => j.existing.length).length;
+  if (dup) w.push(`${dup} entr${dup > 1 ? "ies" : "y"} will be added on top of existing worklogs.`);
+  return w;
+}
+
+async function openPreview(customJobs) {
+  let jobs = customJobs;
+  if (!jobs) {
+    const months = [...new Set(sortedSelected().map((d) => d.slice(0, 7)))];
+    try { for (const mk of months) { const [y, m] = mk.split("-").map(Number); await loadMonth(y, m - 1); } }
+    catch (e) { toast("Could not check existing worklogs: " + e.message); return; }
+    jobs = buildJobs();
+  }
+  const start = $("#startTime").value || "10:00";
+  let dry = false;
+  const renderP = () => {
+    const inc = jobs.filter((j) => j.include);
+    const secs = inc.reduce((a, j) => a + parseDuration(j.duration), 0);
+    const dupCount = jobs.filter((j) => j.existing.length).length;
+    const bad = inc.some((j) => !parseDuration(j.duration));
+    const warns = warningsFor(jobs);
+    openModal(`
+      <h3>Review before submitting</h3>
+      <p class="muted">Start time ${esc(start)} · Weekends excluded: ${S.settings.weekend ? "NO" : "YES"} · Dates with existing worklogs: <b>${dupCount}</b></p>
+      ${warns.length ? `<div class="warnbox"><b>⚠ Check these:</b><ul>${warns.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>` : ""}
+      <div class="scroll" style="max-height:44vh"><table><tr><th></th><th>Date</th><th>Issue</th><th>Duration</th><th>Comment</th><th>Existing</th></tr>
+      ${jobs.map((j, i) => `<tr>
+        <td><input type="checkbox" data-i="${i}" class="inc" ${j.include ? "checked" : ""}></td>
+        <td>${prettyDate(j.date)}</td><td>${esc(j.issue.key)}</td>
+        <td><input class="jd" data-i="${i}" value="${esc(j.duration)}"></td>
+        <td>${esc(j.comment) || '<span class="muted">—</span>'}</td>
+        <td>${j.existing.length ? `<span class="st-failed">${fmtH(j.existing.reduce((a, e) => a + e.secs, 0))}</span> ${j.existing.map((e) => esc(e.comment || "no comment")).join("; ")} <small class="muted">(${esc(j.existing[0].author)})</small>` : "—"}</td></tr>`).join("")}
+      </table></div>
+      <p><b>${inc.length}</b> entries · <b>${fmtH(secs)}</b> total</p>
+      <div class="foot"><label class="check"><input type="checkbox" id="pvDry" ${dry ? "checked" : ""}> Dry run (don't send anything)</label><div class="grow"></div>
+        <button id="pvCancel">Cancel</button><button id="pvGo" class="primary" ${!inc.length || bad ? "disabled" : ""}>${dry ? "Dry-run" : "Submit"} ${inc.length} worklog${inc.length === 1 ? "" : "s"}</button></div>`);
+    const box = $("#modalBox");
+    box.querySelectorAll(".inc").forEach((c) => c.addEventListener("change", (e) => { jobs[e.target.dataset.i].include = e.target.checked; renderP(); }));
+    box.querySelectorAll(".jd").forEach((c) => c.addEventListener("change", (e) => { jobs[e.target.dataset.i].duration = e.target.value; renderP(); }));
+    $("#pvDry").onchange = (e) => { dry = e.target.checked; renderP(); };
+    $("#pvCancel").onclick = closeModal;
+    $("#pvGo").onclick = () => runSubmission(jobs.filter((j) => j.include), start, dry);
+  };
+  renderP();
+}
+
+function startedStamp(date, time) {
+  const [h, mi] = time.split(":").map(Number);
+  const dt = new Date(+date.slice(0, 4), +date.slice(5, 7) - 1, +date.slice(8, 10), h, mi);
+  const off = -dt.getTimezoneOffset(), sign = off >= 0 ? "+" : "-", a = Math.abs(off);
+  return `${date}T${pad(h)}:${pad(mi)}:00.000${sign}${pad(Math.floor(a / 60))}${pad(a % 60)}`;
+}
+
+/** Used after an uncertain failure / before a retry, so we never create duplicates. */
+async function worklogAlreadyExists(job) {
+  const wl = await jira(API.issueWorklogs(job.issue.id));
+  const secs = parseDuration(job.duration);
+  return (wl.worklogs || []).find((w) =>
+    w.author?.accountId === S.me.accountId && String(w.started).slice(0, 10) === job.date &&
+    w.timeSpentSeconds === secs && (typeof w.comment === "string" ? w.comment : "") === job.comment &&
+    Date.now() - new Date(w.created).getTime() < 15 * 60 * 1000);
+}
+
+async function runSubmission(jobs, start, dry) {
+  const bid = uid() + Date.now().toString(36);
+  jobs.forEach((j) => { j.status = "pending"; j.error = ""; j.batchId ||= bid; });
+  let abort = false;
+  const draw = (done) => {
+    const finished = jobs.filter((j) => j.status === "success" || j.status === "failed").length;
+    const failed = jobs.filter((j) => j.status === "failed");
+    openModal(`
+      <h3>${dry ? "Dry run " : ""}${done ? "finished" : "running…"}</h3>
+      <div class="progress"><div style="height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2));width:${jobs.length ? (finished / jobs.length) * 100 : 0}%"></div></div>
+      <p>Progress: <b>${finished}/${jobs.length}</b> · Failed: <b>${failed.length}</b></p>
+      <div class="scroll" style="max-height:50vh"><table>${jobs.map((j) => `<tr><td>${prettyDate(j.date)}</td><td>${esc(j.issue.key)}</td><td>${esc(j.duration)}</td>
+        <td class="st-${j.status}">${j.status.toUpperCase()}${j.error ? ` — ${esc(j.error)}` : ""}</td></tr>`).join("")}</table></div>
+      <div class="foot">${done ? `${failed.length ? '<button id="retryFailed" class="primary">Retry failed only</button>' : ""}${!dry && finished > failed.length ? '<button id="goNw">🏢 Sync NewersWorld timesheet…</button>' : ""}${!dry ? [...new Map(jobs.filter((j) => j.status === "success").map((j) => [j.issue.id, j.issue])).values()].slice(0, 3).map((i) => `<button class="fieldsAfter" data-i="${esc(i.id)}" data-k="${esc(i.key)}" data-s="${esc(i.summary)}">📝 ${esc(i.key)} fields</button>`).join("") : ""}<button id="doneBtn">Close</button>` : ""}</div>`);
+    if (done) {
+      $("#doneBtn").onclick = closeModal; $("#retryFailed")?.addEventListener("click", () => runSubmission(failed, start, dry));
+      document.querySelectorAll(".fieldsAfter").forEach((b) => b.addEventListener("click", () => { closeModal(); window.openIssueFields?.({ id: b.dataset.i, key: b.dataset.k, summary: b.dataset.s }); }));
+      $("#goNw")?.addEventListener("click", () => { closeModal(); document.querySelector('.nav[data-view="nw"]').click(); });
+    }
+  };
+  draw(false);
+  for (const j of jobs) {
+    if (abort) break;
+    j.status = "processing"; draw(false);
+    const key = `${j.issue.id}|${j.date}`;
+    if (dry) { await sleep(60); j.status = "success"; j.error = "dry run — nothing sent"; draw(false); continue; }
+    try {
+      if (j.attempted && await worklogAlreadyExists(j)) { j.status = "success"; j.error = "already existed (verified)"; }
+      else {
+        j.attempted = true;
+        const body = { timeSpentSeconds: parseDuration(j.duration), started: startedStamp(j.date, start) };
+        if (j.comment) body.comment = j.comment;
+        const res = await jira(API.addWorklog(j.issue.id), { method: "POST", body: JSON.stringify(body) });
+        j.worklogId = res?.id; j.status = "success";
+      }
+      S.failed.delete(key);
+    } catch (e) {
+      if (e.uncertain) {
+        try {
+          const found = await worklogAlreadyExists(j);
+          if (found) { j.status = "success"; j.worklogId = found.id; j.error = "verified after network error"; S.failed.delete(key); } else throw e;
+        } catch { j.status = "failed"; j.error = "Result unknown: " + e.message + " (verify before retry)"; S.failed.add(key); }
+      } else {
+        j.status = "failed"; j.error = e.message; S.failed.add(key);
+        if (e.status === 401) { abort = true; j.error = "Credentials rejected — reconnect Jira"; }
+      }
+    }
+    await logHistory(j);
+    draw(false);
+    if (!abort) await sleep(S.settings.delay);
+  }
+  jobs.filter((j) => j.status === "processing" || j.status === "pending").forEach((j) => { j.status = "failed"; j.error ||= "Not attempted"; });
+  if (!dry) {
+    for (const j of jobs) if (j.comment && j.status === "success" && !S.comments.includes(j.comment)) S.comments.unshift(j.comment);
+    S.comments = S.comments.slice(0, 20); await store.set("comments", S.comments);
+  }
+  draw(true);
+  if (!dry) { S.months = {}; S.weekInputs = {}; await gotoMonth(S.y, S.m); if (abort) checkConnection(); }
+}
+
+async function logHistory(j) {
+  S.history.unshift({ id: uid(), batchId: j.batchId, ts: new Date().toISOString(), date: j.date, issueKey: j.issue.key, issueId: String(j.issue.id), duration: j.duration, comment: j.comment, status: j.status, error: j.error || "", worklogId: j.worklogId || "" });
+  S.history = S.history.slice(0, 2000);
+  await store.set("history", S.history);
+}
+
+// ================= fill my month / balance / suggestions =================
+async function fillMonth() {
+  let valid = S.rows.filter((r) => r.issue && parseDuration(r.duration));
+  if (!valid.length) {
+    const sel = $("#planSel").value, plan = S.plans[sel] || S.plans[0];
+    if (!plan) { toast("Configure issues first, or save a monthly plan"); return; }
+    loadPlanRows(plan); valid = S.rows;
+  }
+  await loadMonth(S.y, S.m);
+  const isCurrent = monthKey(S.y, S.m) === todayStr().slice(0, 7);
+  const data = S.months[monthKey(S.y, S.m)];
+  const days = workingDays(S.y, S.m).filter((d) => !data.byDate[d] && (!isCurrent || d <= todayStr()));
+  if (!days.length) { toast("Nothing to fill — no missing working days"); return; }
+  S.selected = new Set(days); renderCalendar();
+  openPreview();
+}
+
+function balanceDialog() {
+  const data = S.months[monthKey(S.y, S.m)] || { byDate: {} };
+  const target = S.settings.target * 3600;
+  const gaps = workingDays(S.y, S.m).filter((d) => d <= todayStr()).map((d) => [d, target - (data.byDate[d]?.secs || 0), data.byDate[d]?.secs || 0]).filter(([, g, s]) => s > 0 && g > 0);
+  if (!gaps.length) { toast("No partial days to balance 🎉"); return; }
+  const valid = S.rows.filter((r) => r.issue);
+  const pool = [...valid.map((r) => r.issue), ...S.pinned].filter((i, k, a) => a.findIndex((x) => x.id === i.id) === k);
+  if (!pool.length) { toast("Pick or pin an issue first"); return; }
+  openModal(`<h3>Balance partial days</h3>
+    <p class="muted">Add the missing hours so each of these ${gaps.length} days reaches ${S.settings.target}h.</p>
+    <label>Log the gap on <select id="balIssue">${pool.map((i) => `<option value="${i.id}">${esc(i.key)} — ${esc(i.summary).slice(0, 60)}</option>`).join("")}</select></label>
+    <label>Comment <input id="balCmt" value="${esc(valid[0]?.comment || "")}" style="width:100%"></label>
+    <table>${gaps.map(([d, g, s]) => `<tr><td>${prettyDate(d)}</td><td>logged ${fmtH(s)}</td><td>+${fmtH(g)}</td></tr>`).join("")}</table>
+    <div class="foot"><button id="balCancel">Cancel</button><button id="balGo" class="primary">Continue to review</button></div>`);
+  $("#balCancel").onclick = closeModal;
+  $("#balGo").onclick = () => {
+    const issue = pool.find((i) => i.id === $("#balIssue").value), cmt = $("#balCmt").value;
+    openPreview(gaps.map(([d, g]) => makeJob(issue, d, secsToDur(g), cmt, true)));
+  };
+}
+
+function patternFrom(data) {
+  const stats = {};
+  for (const d of Object.values(data.byDate)) for (const e of d.entries) {
+    const s = (stats[e.issueId] ||= { issue: data.issues[e.issueId], n: 0, durs: {}, cmts: {} });
+    s.n++; s.durs[e.secs] = (s.durs[e.secs] || 0) + 1; s.cmts[e.comment] = (s.cmts[e.comment] || 0) + 1;
+  }
+  const top = (o) => Object.entries(o).sort((a, b) => b[1] - a[1])[0]?.[0];
+  return Object.values(stats).sort((a, b) => b.n - a.n).slice(0, 5).map((s) => ({ issue: s.issue, duration: fmtH(+top(s.durs)), comment: top(s.cmts) || "", days: s.n }));
+}
+async function loadSuggestion() {
+  if (!S.me) return;
+  const pm = new Date(S.y, S.m - 1, 1);
+  try { S.prevPattern = patternFrom(await loadMonth(pm.getFullYear(), pm.getMonth())); } catch { S.prevPattern = null; }
+  renderSuggestion();
+}
+function renderSuggestion() {
+  const el = $("#suggest");
+  if (!S.prevPattern?.length || S.rows.some((r) => r.issue)) { el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  el.innerHTML = `💡 Last month you usually logged: ${S.prevPattern.map((p) => `<b>${esc(p.issue.key)}</b> ${esc(p.duration)} (${p.days} days)`).join(", ")} <button id="sgApply" class="small">Use this</button>`;
+  $("#sgApply").onclick = () => { S.rows = S.prevPattern.map((p) => newRow({ issue: p.issue, duration: p.duration, comment: p.comment })); renderRows(); renderSelection(); renderSuggestion(); };
+}
+async function copyPrevious() {
+  const pm = new Date(S.y, S.m - 1, 1);
+  try {
+    const rows = patternFrom(await loadMonth(pm.getFullYear(), pm.getMonth()));
+    if (!rows.length) { toast("No worklogs found in previous month"); return; }
+    S.rows = rows.map((p) => newRow({ issue: p.issue, duration: p.duration, comment: p.comment })); renderRows();
+    await loadMonth(S.y, S.m);
+    missingDays().forEach((d) => S.selected.add(d));
+    renderCalendar(); toast(`Copied ${rows.length} issue(s) from ${MONTHS[pm.getMonth()]}. Missing days selected.`);
+  } catch (e) { toast("Copy failed: " + e.message); }
+}
+
+// ================= weekly grid =================
+const weekDates = () => Array.from({ length: S.settings.weekend ? 7 : 5 }, (_, i) => ymdOf(addDays(S.week, i)));
+const normHours = (v) => { const t = String(v || "").trim(); return /^\d+(\.\d+)?$/.test(t) ? t + "h" : t; };
+
+function weekIssueList() {
+  const map = new Map();
+  const add = (i) => i && !map.has(String(i.id)) && map.set(String(i.id), { id: String(i.id), key: i.key, summary: i.summary || "" });
+  for (const d of weekDates()) { const md = monthData(d); (md.byDate[d]?.entries || []).forEach((e) => add(md.issues[e.issueId] || { id: e.issueId, key: e.issueKey })); }
+  S.pinned.forEach(add); S.rows.forEach((r) => add(r.issue)); S.weekIssues.forEach(add);
+  return [...map.values()];
+}
+
+async function renderWeekly() {
+  const dates = weekDates();
+  $("#wTitle").textContent = `${prettyDate(dates[0])} → ${prettyDate(dates[dates.length - 1])}`;
+  try { await ensureRange(dates[0], dates[dates.length - 1]); } catch (e) { toast(e.message); }
+  const issues = weekIssueList();
+  const head = `<tr><th>Issue</th>${dates.map((d) => `<th class="${isOffDay(d) ? "offc" : ""}">${DOW[(new Date(d + "T00:00:00").getDay() + 6) % 7]}<br><small>${d.slice(8)}/${d.slice(5, 7)}</small>${holidayOf(d) ? "<br>🏖" : ""}</th>`).join("")}<th>Total</th></tr>`;
+  const body = issues.map((i) => {
+    const tot = dates.reduce((a, d) => a + loggedSecs(i.id, d), 0);
+    return `<tr><td class="icell"><b>${esc(i.key)}</b><small class="muted">${esc(i.summary).slice(0, 44)}</small>
+      <input class="wc" data-i="${i.id}" placeholder="comment" value="${esc(S.weekComments[i.id] || "")}" list="wcl-${i.id}"><datalist id="wcl-${i.id}">${commentsFor(i.id).map((c) => `<option value="${esc(c)}">`).join("")}</datalist></td>
+      ${dates.map((d) => { const l = loggedSecs(i.id, d); return `<td class="${isOffDay(d) ? "offc" : ""}"><div class="lg-s">${l ? fmtH(l) : ""}</div><input class="wi" data-i="${i.id}" data-d="${d}" placeholder="+" value="${esc(S.weekInputs[i.id + "|" + d] || "")}" ${isOffDay(d) ? "disabled" : ""}></td>`; }).join("")}
+      <td>${tot ? fmtH(tot) : ""}</td></tr>`;
+  }).join("");
+  const foot = `<tr class="tot"><td>Logged / +new</td>${dates.map((d) => `<td data-ct="${d}"></td>`).join("")}<td data-ct="all"></td></tr>`;
+  $("#wTable").innerHTML = head + (body || `<tr><td colspan="${dates.length + 2}" class="muted">No issues yet — add one with the box above, or pin issues.</td></tr>`) + foot;
+  updateWeekTotals();
+}
+function updateWeekTotals() {
+  const dates = weekDates(); let allL = 0, allN = 0;
+  for (const d of dates) {
+    const l = monthData(d).byDate[d]?.secs || 0;
+    const n = [...S.weekInputsEntries(d)].reduce((a, v) => a + parseDuration(v), 0);
+    allL += l; allN += n;
+    const c = $(`[data-ct="${d}"]`); if (c) c.innerHTML = `${fmtH(l)}${n ? ` <span class="st-processing">+${fmtH(n)}</span>` : ""}`;
+  }
+  const c = $('[data-ct="all"]'); if (c) c.innerHTML = `${fmtH(allL)}${allN ? ` <span class="st-processing">+${fmtH(allN)}</span>` : ""}`;
+}
+S.weekInputsEntries = function* (d) { for (const [k, v] of Object.entries(S.weekInputs)) if (k.endsWith("|" + d) && v) yield normHours(v); };
+
+async function weeklyCopyLast() {
+  const prev = addDays(S.week, -7);
+  const pd = Array.from({ length: S.settings.weekend ? 7 : 5 }, (_, i) => ymdOf(addDays(prev, i)));
+  await ensureRange(pd[0], pd[pd.length - 1]);
+  let n = 0;
+  pd.forEach((d, i) => {
+    const target = ymdOf(addDays(S.week, i)); if (isOffDay(target)) return;
+    const md = monthData(d);
+    for (const e of md.byDate[d]?.entries || []) {
+      const key = e.issueId + "|" + target;
+      S.weekInputs[key] = fmtH((parseDuration(S.weekInputs[key]) || 0) + e.secs);
+      if (!S.weekIssues.some((i2) => i2.id === e.issueId)) S.weekIssues.push({ id: e.issueId, key: e.issueKey, summary: md.issues[e.issueId]?.summary || "" });
+      if (e.comment && !S.weekComments[e.issueId]) S.weekComments[e.issueId] = e.comment;
+      n++;
+    }
+  });
+  renderWeekly(); toast(n ? `Copied ${n} entries from last week — review, then submit` : "Last week has no worklogs");
+}
+
+async function weeklySubmit() {
+  const issues = new Map(weekIssueList().map((i) => [i.id, i]));
+  const jobs = [];
+  for (const [k, v] of Object.entries(S.weekInputs)) {
+    const [iid, d] = k.split("|"); const dur = normHours(v);
+    if (!v || !issues.has(iid) || !parseDuration(dur)) continue;
+    jobs.push(makeJob(issues.get(iid), d, dur, S.weekComments[iid] || "", true));
+  }
+  if (!jobs.length) { toast("Type hours in the grid first"); return; }
+  jobs.sort((a, b) => a.date.localeCompare(b.date) || a.issue.key.localeCompare(b.issue.key));
+  openPreview(jobs);
+}
+
+// ================= reports =================
+async function renderReports() {
+  $("#repTitle").textContent = `${MONTHS[S.m]} ${S.y}`;
+  let data;
+  try { data = await loadMonth(S.y, S.m); } catch (e) { $("#repDays").textContent = e.message; return; }
+  const entries = Object.values(data.byDate).flatMap((d) => d.entries);
+  const target = S.settings.target * 3600;
+  const last = new Date(S.y, S.m + 1, 0).getDate();
+  const maxS = Math.max(target, ...Object.values(data.byDate).map((d) => d.secs), 1);
+  $("#repDays").innerHTML = Array.from({ length: last }, (_, i) => {
+    const s = ymd(S.y, S.m, i + 1), secs = data.byDate[s]?.secs || 0, st = dayStatus(s, data);
+    return `<div class="col" title="${prettyDate(s)}: ${fmtH(secs)}"><div class="bar ${st}" style="height:${(secs / maxS) * 100}%"></div><small>${i + 1}</small></div>`;
+  }).join("");
+  const group = (keyFn) => { const m = {}; entries.forEach((e) => { const k = keyFn(e); m[k] = (m[k] || 0) + e.secs; }); return Object.entries(m).sort((a, b) => b[1] - a[1]); };
+  const bars = (rows, labelFn = (k) => k) => { const mx = Math.max(...rows.map((r) => r[1]), 1); return rows.map(([k, v]) => `<div class="hbar"><span class="lab" title="${esc(labelFn(k))}">${esc(labelFn(k))}</span><div class="track"><div style="width:${(v / mx) * 100}%"></div></div><b>${fmtH(v)}</b></div>`).join("") || '<p class="muted">No data</p>'; };
+  $("#repIssues").innerHTML = bars(group((e) => e.issueKey), (k) => k + " " + (Object.values(data.issues).find((i) => i.key === k)?.summary || "").slice(0, 30));
+  $("#repProjects").innerHTML = bars(group((e) => e.issueKey.split("-")[0]));
+  $("#repWeeks").innerHTML = bars(group((e) => "Week of " + prettyDate(ymdOf(mondayOf(e.date + "T00:00:00")))).sort((a, b) => a[0].localeCompare(b[0])));
+}
+function printTimesheet() {
+  const data = S.months[monthKey(S.y, S.m)]; if (!data) return;
+  const rows = Object.values(data.byDate).flatMap((d) => d.entries).sort((a, b) => a.date.localeCompare(b.date) || a.issueKey.localeCompare(b.issueKey));
+  const total = rows.reduce((a, e) => a + e.secs, 0);
+  const per = {}; rows.forEach((e) => { per[e.issueKey] = (per[e.issueKey] || 0) + e.secs; });
+  const w = window.open("", "_blank");
+  if (!w) { toast("Allow pop-ups to print"); return; }
+  w.document.write(`<!doctype html><title>Timesheet ${MONTHS[S.m]} ${S.y}</title><style>body{font:13px system-ui;margin:30px}table{border-collapse:collapse;width:100%;margin-bottom:20px}td,th{border:1px solid #bbb;padding:5px 8px;text-align:left}th{background:#eee}h1{font-size:20px}</style>
+  <h1>Timesheet — ${esc(S.me?.displayName || "")}<br><small>${MONTHS[S.m]} ${S.y}</small></h1>
+  <h3>Summary by issue</h3><table><tr><th>Issue</th><th>Hours</th></tr>${Object.entries(per).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${fmtH(v)}</td></tr>`).join("")}<tr><th>Total</th><th>${fmtH(total)}</th></tr></table>
+  <h3>Daily detail</h3><table><tr><th>Date</th><th>Issue</th><th>Hours</th><th>Comment</th></tr>${rows.map((e) => `<tr><td>${prettyDate(e.date)}</td><td>${esc(e.issueKey)}</td><td>${fmtH(e.secs)}</td><td>${esc(e.comment)}</td></tr>`).join("")}</table>
+  <script>window.onload=()=>window.print()<\/script>`);
+  w.document.close();
+}
+
+// ================= history & undo =================
+function renderHistory() {
+  const f = $("#histFilter").value.trim().toLowerCase(), st = $("#histStatus").value;
+  const rows = S.history.filter((h) => (!f || h.issueKey.toLowerCase().includes(f)) && (!st || h.status === st)).slice(0, 300);
+  $("#histTable").innerHTML = `<tr><th>Time</th><th>Date</th><th>Issue</th><th>Duration</th><th>Comment</th><th>Status</th><th></th></tr>` +
+    (rows.map((h) => `<tr><td>${new Date(h.ts).toLocaleString()}</td><td>${prettyDate(h.date)}</td><td>${esc(h.issueKey)}</td><td>${esc(h.duration)}</td><td>${esc(h.comment)}</td><td class="st-${h.deleted ? "pending" : h.status}">${h.deleted ? "undone" : h.status}${h.error ? " — " + esc(h.error) : ""}</td>
+      <td>${h.status === "success" && h.worklogId && !h.deleted ? `<button class="small danger" data-undo="${h.id}">Undo</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No history</td></tr>');
+  const batches = {};
+  S.history.filter((h) => h.batchId && h.status === "success" && h.worklogId && !h.deleted).forEach((h) => { (batches[h.batchId] ||= []).push(h); });
+  const list = Object.entries(batches).slice(0, 8);
+  $("#batches").innerHTML = list.map(([id, hs]) => `<div class="li"><span><b>${new Date(hs[0].ts).toLocaleString()}</b> — ${hs.length} worklogs, ${esc([...new Set(hs.map((h) => h.issueKey))].join(", "))}, ${fmtH(hs.reduce((a, h) => a + parseDuration(h.duration), 0))}</span><button class="small danger" data-undobatch="${id}">Undo batch</button></div>`).join("") || '<p class="muted">No undoable batches.</p>';
+}
+async function undoEntries(list, label) {
+  if (!list.length || !confirm(`Delete ${list.length} worklog(s) from Jira (${label})? This cannot be undone.`)) return;
+  let ok = 0, fail = 0;
+  for (const h of list) {
+    try { await jira(API.delWorklog(h.issueId, h.worklogId), { method: "DELETE" }); h.deleted = true; ok++; }
+    catch (e) { if (e.status === 404) { h.deleted = true; ok++; } else { fail++; toast("Delete failed: " + e.message); } }
+    await sleep(S.settings.delay);
+  }
+  await store.set("history", S.history);
+  toast(`Removed ${ok} worklog(s)${fail ? `, ${fail} failed` : ""}`);
+  S.months = {}; await gotoMonth(S.y, S.m); renderHistory();
+}
+
+// ================= settings / holidays =================
+function fillSettings() {
+  const s = S.settings;
+  $("#setTarget").value = s.target; $("#setDur").value = s.duration; $("#setStart").value = s.start; $("#setDelay").value = s.delay;
+  $("#setWeekend").checked = s.weekend; $("#startTime").value = s.start; $("#dupMode").value = s.dup;
+}
+function renderHolidays() {
+  const items = Object.entries(S.holidays).sort();
+  $("#holList").innerHTML = items.map(([d, h]) => `<div class="li"><span>${prettyDate(d)} — ${esc(h.label)} <small class="muted">(${h.type}${h.source === "newersworld" ? " · from NewersWorld" : ""})</small></span><button class="small danger" data-delhol="${d}">✕</button></div>`).join("") || '<p class="muted tiny">None added.</p>';
+}
+async function saveHolidays() { await store.set("holidays", S.holidays); renderHolidays(); renderCalendar(); }
+
+// ================= boot =================
+async function boot() {
+  const ok = await checkConnection();
+  if (ok) await gotoMonth(S.y, S.m); else renderCalendar();
+  renderSelection();
+}
+
+async function init() {
+  S.settings = { ...DEFAULTS, ...(await store.get("settings", {})) };
+  S.templates = await store.get("templates", [
+    { name: "DSM & meeting — 2h", duration: "2h", comment: "DSM and meeting Team Support" },
+    { name: "Development — 4h", duration: "4h", comment: "Development and implementation activities" },
+    { name: "Dev, debug & test — 8h", duration: "8h", comment: "Development, debugging and testing activities" },
+  ]);
+  S.plans = await store.get("plans", []); S.holidays = await store.get("holidays", {}); S.pinned = await store.get("pinned", []);
+  S.comments = await store.get("comments", []);
+  S.history = (await store.get("history", [])).map((h) => ({ id: uid(), ...h }));
+  S.rows = [newRow()];
+  document.documentElement.dataset.theme = await store.get("theme", "dark");
+
+  $("#monthSel").innerHTML = MONTHS.map((n, i) => `<option value="${i}">${n}</option>`).join("");
+  fillSettings(); renderTemplates(); renderRows(); renderPinned(); renderHolidays();
+
+  document.querySelectorAll(".nav").forEach((b) => b.addEventListener("click", () => {
+    document.querySelectorAll(".nav").forEach((x) => x.classList.toggle("active", x === b));
+    document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + b.dataset.view));
+    renderAll();
+  }));
+  $("#themeBtn").onclick = async () => { const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = t; await store.set("theme", t); };
+  $("#syncBtn").onclick = () => refreshNow(false);
+
+  // calendar
+  $("#calendar").addEventListener("click", (e) => { const d = e.target.closest(".day[data-d]"); if (d) toggleDate(d.dataset.d, e.shiftKey); });
+  $("#prevM").onclick = () => gotoMonth(S.y, S.m - 1);
+  $("#nextM").onclick = () => gotoMonth(S.y, S.m + 1);
+  $("#todayM").onclick = () => gotoMonth(new Date().getFullYear(), new Date().getMonth());
+  $("#monthSel").onchange = (e) => gotoMonth(S.y, +e.target.value);
+  $("#yearSel").onchange = (e) => gotoMonth(+e.target.value, S.m);
+  $("#selWeekdays").onclick = () => { workingDays(S.y, S.m).forEach((d) => S.selected.add(d)); renderCalendar(); };
+  $("#selMissing").onclick = () => { const data = S.months[monthKey(S.y, S.m)] || { byDate: {} }; workingDays(S.y, S.m).filter((d) => !data.byDate[d]).forEach((d) => S.selected.add(d)); renderCalendar(); };
+  $("#clearSel").onclick = () => { S.selected.clear(); renderCalendar(); };
+  $("#balance").onclick = balanceDialog;
+
+  // config
+  $("#addRow").onclick = () => { S.rows.push(newRow()); renderRows(); renderSelection(); };
+  $("#previewBtn").onclick = () => openPreview();
+  $("#fillMonth").onclick = fillMonth;
+  $("#copyPrev").onclick = copyPrevious;
+  $("#startTime").onchange = (e) => { S.settings.start = e.target.value; };
+  $("#dupMode").onchange = (e) => { S.settings.dup = e.target.value; store.set("settings", S.settings); };
+  $("#pinned").addEventListener("click", (e) => { const c = e.target.closest(".pin"); if (c) { const p = S.pinned.find((x) => x.id === c.dataset.id); if (e.shiftKey) togglePin(p); else setRowIssue(p); } });
+  $("#pinned").title = "Click to use · Shift+click to unpin";
+  $("#tplSel").onchange = (e) => {
+    const t = S.templates[e.target.value]; if (!t) return;
+    const row = S.rows.find((r) => !r.comment) || S.rows[S.rows.length - 1];
+    row.duration = t.duration; row.comment = t.comment; renderRows(); renderSelection(); e.target.value = "";
+  };
+  $("#tplSave").onclick = async () => {
+    const r = S.rows[0]; const name = prompt("Template name?", `${r.comment || "Template"} — ${r.duration}`);
+    if (!name) return; S.templates.push({ name, duration: r.duration, comment: r.comment }); await store.set("templates", S.templates); renderTemplates(); toast("Template saved");
+  };
+  $("#planSel").onchange = (e) => { const p = S.plans[e.target.value]; if (p) loadPlanRows(p); };
+  $("#planSave").onclick = async () => {
+    const valid = S.rows.filter((r) => r.issue && parseDuration(r.duration));
+    if (!valid.length) { toast("Pick at least one issue first"); return; }
+    const name = prompt("Plan name?", valid.map((r) => r.issue.key + " " + r.duration).join(" + ")); if (!name) return;
+    S.plans.push({ name, rows: valid.map((r) => ({ issue: r.issue, duration: r.duration, comment: r.comment })) });
+    await store.set("plans", S.plans); renderTemplates(); renderSelection(); toast("Monthly plan saved");
+  };
+  $("#planList").addEventListener("click", async (e) => { const b = e.target.closest("[data-delplan]"); if (!b) return; S.plans.splice(+b.dataset.delplan, 1); await store.set("plans", S.plans); renderTemplates(); renderSelection(); });
+
+  // weekly
+  attachIssueSearch($("#wAdd"), $("#wAddRes"), (i) => { if (!S.weekIssues.some((x) => x.id === i.id)) S.weekIssues.push(i); $("#wAdd").value = ""; renderWeekly(); });
+  $("#wPrev").onclick = () => { S.week = addDays(S.week, -7); renderWeekly(); };
+  $("#wNext").onclick = () => { S.week = addDays(S.week, 7); renderWeekly(); };
+  $("#wToday").onclick = () => { S.week = mondayOf(new Date()); renderWeekly(); };
+  $("#wCopy").onclick = weeklyCopyLast;
+  $("#wGo").onclick = weeklySubmit;
+  $("#wTable").addEventListener("input", (e) => {
+    const t = e.target;
+    if (t.classList.contains("wi")) { S.weekInputs[t.dataset.i + "|" + t.dataset.d] = t.value; t.style.borderColor = !t.value || parseDuration(normHours(t.value)) ? "" : "var(--bad)"; updateWeekTotals(); }
+    if (t.classList.contains("wc")) S.weekComments[t.dataset.i] = t.value;
+  });
+
+  // reports / history
+  $("#repCsv").onclick = async () => {
+    const data = await loadMonth(S.y, S.m);
+    const rows = Object.values(data.byDate).flatMap((d) => d.entries).sort((a, b) => a.date.localeCompare(b.date));
+    download(`worklogs-${monthKey(S.y, S.m)}.csv`, csv([["date", "issue", "hours", "comment"], ...rows.map((e) => [e.date, e.issueKey, e.secs / 3600, e.comment])]));
+  };
+  $("#repPrint").onclick = printTimesheet;
+  $("#histFilter").oninput = renderHistory; $("#histStatus").onchange = renderHistory;
+  $("#histCsv").onclick = () => download("jiratime-history.csv", csv([["time", "date", "issue", "duration", "comment", "status", "error", "worklogId"], ...S.history.map((h) => [h.ts, h.date, h.issueKey, h.duration, h.comment, h.status, h.error, h.worklogId])]));
+  $("#histClear").onclick = async () => { if (confirm("Clear local history? (Undo for these entries will no longer be possible)")) { S.history = []; await store.set("history", []); renderHistory(); } };
+  $("#view-history").addEventListener("click", (e) => {
+    const u = e.target.closest("[data-undo]"), b = e.target.closest("[data-undobatch]");
+    if (u) undoEntries(S.history.filter((h) => h.id === u.dataset.undo), "1 entry");
+    if (b) undoEntries(S.history.filter((h) => h.batchId === b.dataset.undobatch && h.status === "success" && h.worklogId && !h.deleted), "whole batch");
+  });
+
+  // settings
+  $("#setSave").onclick = async () => {
+    S.settings = { ...S.settings, target: +$("#setTarget").value || 8, duration: $("#setDur").value || "2h", start: $("#setStart").value || "10:00", delay: +$("#setDelay").value || 500, weekend: $("#setWeekend").checked };
+    await store.set("settings", S.settings); toast("Settings saved"); fillSettings(); renderAll();
+  };
+  $("#setReconnect").onclick = () => setupDialog();
+  $("#setLogout").onclick = async () => { await fetch("/api/logout", { method: "POST" }); S.months = {}; toast("Credentials removed"); boot(); };
+  $("#hAdd").onclick = () => { const d = $("#hDate").value; if (!d) return; S.holidays[d] = { label: $("#hLabel").value || $("#hType").value, type: $("#hType").value }; saveHolidays(); };
+  $("#hAddRange").onclick = () => {
+    const a = $("#hFrom").value, b = $("#hTo").value; if (!a || !b || a > b) { toast("Pick a valid from/to range"); return; }
+    for (let t = new Date(a + "T00:00:00"); ymdOf(t) <= b; t.setDate(t.getDate() + 1)) if (!isWeekend(ymdOf(t))) S.holidays[ymdOf(t)] = { label: $("#hLabel").value || $("#hType2").value, type: $("#hType2").value };
+    saveHolidays();
+  };
+  $("#holList").addEventListener("click", (e) => { const b = e.target.closest("[data-delhol]"); if (b) { delete S.holidays[b.dataset.delhol]; saveHolidays(); } });
+
+  $("#modal").addEventListener("mousedown", (e) => { if (e.target.id === "modal" && !/running…/.test($("#modalBox").textContent)) closeModal(); });
+
+  // auto refresh: every 5 min and when the tab becomes visible again
+  setInterval(() => { if (!document.hidden && !modalOpen()) refreshNow(true); }, 5 * 60 * 1000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && !modalOpen() && Date.now() - S.lastSync > 60000) refreshNow(true); });
+
+  await boot();
+}
+init();
