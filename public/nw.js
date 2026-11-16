@@ -65,8 +65,50 @@ async function nwPing() {
 function nwPill() {
   const p = $("#nwBridge");
   p.className = "pill " + (NWA.ready ? "ok" : "warn");
-  p.textContent = NWA.ready ? "● NewersWorld tab connected" : "Agent not connected";
-  $("#nwSetup").classList.toggle("hidden", NWA.ready);
+  p.textContent = NWA.ready ? "● NewersWorld tab connected (live)" : NWT.manual ? "● Manual mode (copy/paste)" : "Agent not connected";
+  if (!NWA.ready && NWT.manual) p.className = "pill ok";
+  $("#nwSetup").classList.toggle("hidden", NWA.ready || NWT.manual);
+  const mt = $("#nwMode"); if (mt) mt.checked = NWT.manual;
+}
+
+// ================= transport: live link, or manual copy/paste =================
+// Some setups block messages between the two tabs. Manual mode moves the same request/answer through the clipboard.
+const NWT = { manual: false };
+async function nwOp(type, payload, timeoutMs) {
+  if (!NWT.manual && NWA.ready) {
+    try { const r = await nwCall({ type, payload }, timeoutMs); if (r?.ok) return r.data; throw new Error(r?.error || "NewersWorld agent failed"); }
+    catch (e) { if (!/timeout|not connected/i.test(e.message)) throw e; NWA.ready = false; nwPill(); }
+  }
+  return nwManual(type, payload);
+}
+function nwManual(type, payload) {
+  return new Promise((resolve, reject) => {
+    const id = uid(), req = "JTREQ:" + JSON.stringify({ id, type, payload });
+    const write = type === "JT_EXECUTE";
+    openModal(`<h3>${write ? "Fill NewersWorld — manual step" : "Read NewersWorld — manual step"}</h3>
+      <ol class="steps">
+        <li><button id="mCopy" class="small">📋 Copy request</button> <span id="mCopied" class="muted tiny"></span></li>
+        <li>Switch to your <b>NewersWorld</b> tab, click the <b>JiraTime Agent</b> bookmark, then <b>Read clipboard</b>${write ? " and <b>Run</b>" : ""}.</li>
+        <li>When it says “Result copied”, come back and press <button id="mPaste" class="small">📥 Paste result</button></li>
+      </ol>
+      <textarea id="mBox" class="mbox" placeholder="…or paste the result here (Ctrl+V)"></textarea>
+      <p id="mErr" class="st-failed"></p>
+      <div class="foot"><button id="mCancel">Cancel</button></div>`);
+    const copy = () => navigator.clipboard.writeText(req).then(() => { $("#mCopied").textContent = "copied ✓"; }).catch(() => { $("#mBox").value = req; $("#mBox").select(); $("#mCopied").textContent = "clipboard blocked — the request is in the box below, press Ctrl+C"; });
+    const take = (text) => {
+      text = String(text || "").trim(); if (!text.startsWith("JTRES:")) { if (text) $("#mErr").textContent = "That is not a JiraTime result. Copy it again from the NewersWorld tab."; return; }
+      let r; try { r = JSON.parse(text.slice(6)); } catch { $("#mErr").textContent = "Result text is incomplete. Copy it again."; return; }
+      if (r.id !== id) { $("#mErr").textContent = "This result belongs to an older request. Press “Copy request” again and redo step 2."; return; }
+      closeModal(); window.removeEventListener("focus", onFocus);
+      r.ok ? resolve(r.data) : reject(new Error(r.error || "NewersWorld agent failed"));
+    };
+    const onFocus = () => navigator.clipboard.readText().then((t) => { if (t.startsWith("JTRES:")) take(t); }).catch(() => {});
+    window.addEventListener("focus", onFocus);
+    $("#mCopy").onclick = copy; copy();
+    $("#mPaste").onclick = () => navigator.clipboard.readText().then(take).catch(() => { $("#mErr").textContent = "Clipboard blocked — paste into the box (Ctrl+V)."; $("#mBox").focus(); });
+    $("#mBox").addEventListener("input", (e) => take(e.target.value));
+    $("#mCancel").onclick = () => { closeModal(); window.removeEventListener("focus", onFocus); reject(new Error("Cancelled")); };
+  });
 }
 
 // ================= week API (ported from the old extension) =================
@@ -91,46 +133,6 @@ function nwNormalizeWeek(data, monday) {
     }
   }
   return { ok: true, states, tasks: [...tasks.values()], records: Object.values(states).flatMap((s) => s.records) };
-}
-
-async function nwFetchWeek(monday) {
-  const end = ymdOf(addDays(new Date(monday + "T00:00:00"), 6));
-  const r = await nwCall({ type: "TIMESHEET_FETCH_WEEK_API", startDate: monday, endDate: end }, 60000);
-  if (!r?.ok) {
-    const expired = r?.status === 401 || r?.status === 403;
-    return { ok: false, error: expired ? "NewersWorld session expired — log in again in the NewersWorld tab" : r?.error || "Week-view API failed" };
-  }
-  return nwNormalizeWeek(r.data, monday) || { ok: false, error: "Unexpected NewersWorld response" };
-}
-
-function nwBuildPayload(api, changes) {
-  const overrides = new Map(), missing = new Set();
-  for (const [date, templates] of Object.entries(changes)) {
-    const records = api.states[date]?.records || [], used = new Set();
-    for (const t of templates) {
-      let rec = records.find((r) => !used.has(r.tsbID) && nwStrip(r.taskName).toLowerCase() === nwStrip(t.taskName).toLowerCase());
-      if (!rec && records.length === 1 && templates.length === 1) rec = records[0];
-      if (!rec?.tsbID) { missing.add(date); continue; }
-      if (rec.isEditable === false) return { ok: false, error: `${date} is not editable in NewersWorld` };
-      used.add(rec.tsbID); overrides.set(rec.tsbID, { hours: String(Number(t.hours)), comment: nwStrip(t.description) || null });
-    }
-  }
-  if (missing.size) return { ok: false, needsDomFill: true, error: `No booking rows for ${[...missing].join(", ")}` };
-  const payload = [];
-  for (const r of api.records) {
-    if (!r.tsbID || isWeekend(r.dateStr)) continue;
-    let hours = Number(r.hours || 0) > 0 ? String(Number(r.hours)) : null, comment = nwStrip(r.description) || null;
-    const o = overrides.get(r.tsbID); if (o) { hours = o.hours; comment = o.comment; }
-    payload.push({ tsbID: r.tsbID, hours, comment });
-  }
-  return payload.length ? { ok: true, payload } : { ok: false, error: "No editable records for this week" };
-}
-
-function nwMatches(state, tpls) {
-  if (!state?.filled) return false;
-  return tpls.every((t) => state.entries.some((e) =>
-    (nwStrip(e.taskName).toLowerCase() === nwStrip(t.taskName).toLowerCase() || (tpls.length === 1 && state.entries.length === 1)) &&
-    Math.abs(Number(e.hours || 0) - Number(t.hours || 0)) < 0.001 && nwStrip(e.description) === nwStrip(t.description)));
 }
 
 // ================= leave import (NewersWorld -> Jira calendar) =================
@@ -190,7 +192,7 @@ async function nwRead(leaveOnly = false) {
   const from = $("#nwFrom").value, to0 = $("#nwTo").value || todayStr(), to = to0 > todayStr() ? todayStr() : to0;
   if (!from || from > to) { toast("Pick a valid From date (not after today)"); return; }
   if (!S.me) { toast("Connect Jira first"); return; }
-  if (!(await nwPing())) { toast(NWA.hint || "Connect the NewersWorld tab first (steps above)"); $("#nwSummary").innerHTML = `<span class="st-failed">${esc(NWA.hint || "")}</span>`; return; }
+  if (!NWT.manual && !(await nwPing())) { NWT.manual = true; nwPill(); toast("No live link to the NewersWorld tab — using manual copy/paste mode"); }
   nwReadPrefs(); NW.busy = true; setNwBusy(true, "Reading Jira worklogs…");
   try {
     await ensureRange(from, to);
@@ -199,12 +201,15 @@ async function nwRead(leaveOnly = false) {
     NW.dates = dates;
     const byDate = {}, taskNames = [];
     const mondays = [...new Set(dates.map(mondayIso))];
-    for (let i = 0; i < mondays.length; i++) {
-      setNwBusy(true, `Reading NewersWorld week ${i + 1} of ${mondays.length}…`);
-      const api = await nwFetchWeek(mondays[i]);
-      if (!api.ok) throw new Error(api.error);
+    setNwBusy(true, `Reading ${mondays.length} NewersWorld week(s)…`);
+    const weeks = await nwOp("JT_READ", { mondays }, 120000);
+    for (const m of mondays) {
+      const w = weeks?.[m];
+      if (!w?.ok) throw new Error(w?.status === 401 || w?.status === 403 ? "NewersWorld session expired — log in again in the NewersWorld tab" : w?.error || "Could not read NewersWorld");
+      const api = nwNormalizeWeek(w.data, m);
+      if (!api) throw new Error("Unexpected NewersWorld response");
       for (const t of api.tasks) if (!taskNames.includes(t.taskName)) taskNames.push(t.taskName);
-      for (const d of dates.filter((x) => mondayIso(x) === mondays[i])) {
+      for (const d of dates.filter((x) => mondayIso(x) === m)) {
         const st = api.states[d];
         byDate[d] = { onLeave: st.onLeave, leaveTypes: st.leaveTypes, locked: !st.isEditable, alreadyFilled: st.filled, existingEntries: st.entries, tasks: api.tasks };
       }
@@ -260,53 +265,9 @@ function renderNw() {
 
 // ================= execute (ported from the old extension) =================
 async function nwExecute(rows, progress) {
-  const results = [], push = (date, status, ok, error) => results.push({ date, status, ok, error });
-  const groups = {};
-  rows.forEach((r) => (groups[mondayIso(r.date)] ||= []).push(r));
-  let n = 0;
-  for (const [monday, list] of Object.entries(groups)) {
-    progress(`Week of ${prettyDate(monday)} (${++n}/${Object.keys(groups).length})…`);
-    const api = await nwFetchWeek(monday);
-    if (!api.ok) { list.forEach((r) => push(r.date, "error", false, api.error)); continue; }
-    const changes = {}, pending = [];
-    for (const r of list) {
-      const st = api.states[r.date];
-      if (st?.onLeave) { push(r.date, "leave_skipped", true); continue; }
-      if (st && !st.isEditable) { push(r.date, "locked_skipped", true); continue; }
-      if (st?.filled && !r.e.alreadyFilled) { push(r.date, "already_filled", true); continue; }   // filled since we read it
-      const tpl = [{ taskName: r.task, hours: String(r.planned), description: nwDescription(r.jd.issues, NW.prefs.comments) }];
-      changes[r.date] = tpl; pending.push({ date: r.date, tpl });
-    }
-    if (!pending.length) continue;
-    const built = nwBuildPayload(api, changes);
-    if (built.ok) {
-      const save = await nwCall({ type: "TIMESHEET_SAVE_API", payload: built.payload }, 60000);
-      if (!save?.ok) { pending.forEach((p) => push(p.date, "filled_not_saved", false, save?.error || "Save failed")); continue; }
-      await sleep(500);
-    } else if (built.needsDomFill) {
-      // Empty days have no booking row yet -> type into the NewersWorld grid and press its SAVE (same as the old extension).
-      const go = await nwCall({ type: "JT_GOTO", mondayStr: toNw(monday) }, 90000);
-      if (!go?.ok) { pending.forEach((p) => push(p.date, "error", false, "Could not open the week in NewersWorld tab")); continue; }
-      let any = false;
-      for (const p of pending) {
-        const f = await nwCall({ type: "TIMESHEET_FILL_DATE", dateStr: toNw(p.date), tasks: p.tpl, save: false, overwrite: rows.find((r) => r.date === p.date).e.alreadyFilled }, 30000);
-        if (f?.ok && !f.alreadyFilled) any = true; else if (f?.alreadyFilled) { push(p.date, "already_filled", true); p.skip = true; } else { push(p.date, "error", false, f?.error || "Fill failed"); p.skip = true; }
-        await sleep(150);
-      }
-      if (!any) continue;
-      await sleep(500);
-      const sv = await nwCall({ type: "TIMESHEET_SAVE_WEEK" }, 30000);
-      if (!(sv?.ok && sv.status === "CLICKED")) { pending.filter((p) => !p.skip).forEach((p) => push(p.date, "filled_not_saved", false, `Save button: ${sv?.status || sv?.error || "unknown"}`)); continue; }
-      await sleep(2800);
-    } else { pending.forEach((p) => push(p.date, "error", false, built.error)); continue; }
-    // verify against the portal
-    const check = await nwFetchWeek(monday);
-    for (const p of pending.filter((x) => !x.skip)) {
-      if (nwMatches(check.ok ? check.states[p.date] : null, p.tpl)) push(p.date, "filled_saved", true);
-      else push(p.date, "fill_not_persisted", false, check.error || "Portal shows different values after save");
-    }
-  }
-  return results;
+  progress("Sending to the NewersWorld tab…");
+  const items = rows.map((r) => ({ date: r.date, task: r.task, hours: r.planned, description: nwDescription(r.jd.issues, NW.prefs.comments), wasFilled: !!r.e.alreadyFilled }));
+  return (await nwOp("JT_EXECUTE", { items }, 900000)) || [];
 }
 
 const NW_LABELS = { filled_saved: "Filled & saved ✓", already_filled: "Already filled — skipped", filled_not_saved: "Filled, could not save", fill_not_persisted: "Save did not persist", leave_skipped: "Leave — skipped", locked_skipped: "Locked — skipped", error: "Failed" };
@@ -329,14 +290,27 @@ async function nwSync() {
   const show = (t) => openModal(`<h3>Filling NewersWorld…</h3><p class="muted">${esc(t)} Keep the NewersWorld tab open.</p>`);
   show("Starting…");
   let results = [];
-  try { results = await nwExecute(fill, show); } catch (e) { results.push({ date: fill[0]?.date || todayStr(), status: "error", ok: false, error: e.message }); }
+  try { results = await nwExecute(fill, show); }
+  catch (e) {
+    if (e.message === "Cancelled") { NW.busy = false; setNwBusy(false); renderNw(); return; }
+    results.push({ date: fill[0]?.date || todayStr(), status: "error", ok: false, error: e.message });
+  }
   const okN = results.filter((r) => r.status === "filled_saved").length, bad = results.filter((r) => r.ok === false).length;
   openModal(`<h3>NewersWorld sync finished</h3><p><b>${okN}</b> filled & verified · <b>${bad}</b> problem(s)</p>
     <div class="scroll" style="max-height:50vh"><table>${results.sort((a, b) => a.date.localeCompare(b.date)).map((r) => `<tr><td>${prettyDate(r.date)}</td><td class="${r.ok === false ? "st-failed" : "st-success"}">${esc(NW_LABELS[r.status] || r.status)}${r.error ? " — " + esc(r.error) : ""}</td></tr>`).join("")}</table></div>
     <div class="foot"><button id="nwDone" class="primary">Close</button></div>`);
   $("#nwDone").onclick = closeModal;
   NW.busy = false; setNwBusy(false);
-  await nwRead();
+  if (NWA.ready && !NWT.manual) { await nwRead(); return; }
+  // manual mode: update the table from the results instead of another copy/paste round trip
+  const byDate = Object.fromEntries(results.map((r) => [r.date, r]));
+  for (const row of NW.rows) {
+    const r = byDate[row.date]; if (!r) continue;
+    if (r.status === "filled_saved") Object.assign(row, { status: "match", label: "Filled now ✓", fill: false, nwHours: row.planned });
+    else if (r.ok === false) Object.assign(row, { status: "bad", label: NW_LABELS[r.status] || r.status });
+    else Object.assign(row, { status: "skip", label: NW_LABELS[r.status] || r.status, fill: false });
+  }
+  renderNw();
 }
 
 // ================= entering the page =================
@@ -354,6 +328,10 @@ async function nwOpened() {
 
 (async function nwInit() {
   NW.prefs = { ...NW.prefs, ...(await store.get("nwPrefs", {})) };
+  NWT.manual = !!(await store.get("nwManual", false));
+  $("#nwBridge").insertAdjacentHTML("afterend", '<label class="check tiny"><input id="nwMode" type="checkbox"> Manual mode (copy/paste)</label>');
+  $("#nwMode").checked = NWT.manual;
+  $("#nwMode").addEventListener("change", (e) => { NWT.manual = e.target.checked; store.set("nwManual", NWT.manual); nwPill(); });
   const now = new Date();
   $("#nwFrom").value = ymd(now.getFullYear(), now.getMonth(), 1);
   $("#nwTo").value = todayStr(); $("#nwTo").max = todayStr();

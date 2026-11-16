@@ -23,12 +23,12 @@
       st.acked = false;
       say("Connecting to " + host + "…");
       setTimeout(function () {
-        if (!st.acked) say("No answer from JiraTime (" + host + "). Use the \"Open NewersWorld\" button on that page to open THIS tab, then click the bookmark again. [tab origin: " + location.origin + "; opener: " + (toApp() ? "yes" : "no") + "]", true);
+        if (!st.acked) showPanel("No live link to JiraTime (" + host + ") — manual mode. In JiraTime click \"Copy request\", then press \"Read clipboard\" here (or paste into the box).");
       }, 3500);
     }
     if (t && !t.closed) t.postMessage({ jt: "ready" }, APP_ORIGIN);   // the app can also reach us without this (it pings the tab it opened)
   }
-  if (window.__JT_AGENT_LOADED) { announce(true); return; }
+  if (window.__JT_AGENT_LOADED) { announce(true); if (document.getElementById("jt-panel")) window.__JT_SHOWPANEL && window.__JT_SHOWPANEL(); return; }
   window.__JT_AGENT_LOADED = true;
   // Keep re-announcing quietly, so the app reconnects by itself after it was reloaded.
   st.timer = setInterval(function () { announce(false); }, 5000);
@@ -805,6 +805,180 @@
     return { ok: document.querySelectorAll(".detailing").length > 0, hash: location.hash };
   }
 
+
+  // ---------- operations (same logic the JiraTime page used to drive remotely) ----------
+  var NWM = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var pad2 = function (n) { return String(n).padStart(2, "0"); };
+  var isoOf = function (d) { return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); };
+  var addD = function (s, n) { var d = new Date(s + "T00:00:00"); d.setDate(d.getDate() + n); return isoOf(d); };
+  var mondayOf = function (s) { var d = new Date(s + "T00:00:00"); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return isoOf(d); };
+  var toNwStr = function (s) { return s.slice(8) + "-" + NWM[+s.slice(5, 7) - 1] + "-" + s.slice(0, 4); };
+  var clean = function (s) { return String(s || "").replace(/\s+/g, " ").trim(); };
+  var isWknd = function (s) { var d = new Date(s + "T00:00:00").getDay(); return d === 0 || d === 6; };
+  function call(msg) {
+    return new Promise(function (res) {
+      var done = false, once = function (r) { if (!done) { done = true; res(r); } };
+      handlers.forEach(function (h) { try { h(msg, {}, once); } catch (err) { once({ ok: false, error: String(err) }); } });
+      setTimeout(function () { once({ ok: false, error: "No response from page script" }); }, 60000);
+    });
+  }
+  async function fetchRaw(monday) { return call({ type: "TIMESHEET_FETCH_WEEK_API", startDate: monday, endDate: addD(monday, 6) }); }
+  function normalize(data, monday) {
+    if (!data || typeof data !== "object") return null;
+    var states = {}, tasks = {}, i;
+    for (i = 0; i < 7; i++) { var d0 = addD(monday, i); states[d0] = { dateStr: d0, filled: false, entries: [], records: [], onLeave: false, leaveTypes: [], isEditable: false }; }
+    var projects = (data.projects || []).concat(data.nonAllocatedProjects || []);
+    projects.forEach(function (p) { (p.tasks || []).forEach(function (t) {
+      var taskName = clean(t.taskName || "Development"); tasks[taskName] = 1;
+      (t.dates || []).forEach(function (day) {
+        var st = states[String(day.date || "")]; if (!st) return;
+        var rec = { taskName: taskName, hours: String(Number(day.hours || 0)), description: clean(day.comment), tsbID: day.tsbID == null ? null : day.tsbID, isEditable: day.isEditable !== false, dateStr: st.dateStr };
+        st.records.push(rec); if (rec.isEditable) st.isEditable = true;
+        (day.leavesDetails || []).forEach(function (lv) { var x = clean(lv && lv.leaveType); if (x && !/week\s*off/i.test(x)) { st.onLeave = true; if (st.leaveTypes.indexOf(x) < 0) st.leaveTypes.push(x); } });
+        if (Number(day.hours || 0) > 0 || clean(day.comment)) { st.filled = true; st.entries.push(rec); }
+      });
+    }); });
+    var all = []; Object.keys(states).forEach(function (k) { all = all.concat(states[k].records); });
+    return { ok: true, states: states, tasks: Object.keys(tasks), records: all };
+  }
+  async function fetchWeek(monday) {
+    var r = await fetchRaw(monday);
+    if (!r || !r.ok) return { ok: false, status: r && r.status, error: (r && r.error) || "Week-view API failed" };
+    return normalize(r.data, monday) || { ok: false, error: "Unexpected NewersWorld response" };
+  }
+  function buildPayload(api, changes) {
+    var overrides = {}, missing = {}, payload = [];
+    Object.keys(changes).forEach(function (date) {
+      var records = (api.states[date] && api.states[date].records) || [], used = {};
+      changes[date].forEach(function (t) {
+        var rec = records.filter(function (r) { return !used[r.tsbID] && clean(r.taskName).toLowerCase() === clean(t.taskName).toLowerCase(); })[0];
+        if (!rec && records.length === 1 && changes[date].length === 1) rec = records[0];
+        if (!rec || !rec.tsbID) { missing[date] = 1; return; }
+        used[rec.tsbID] = 1; overrides[rec.tsbID] = { hours: String(Number(t.hours)), comment: clean(t.description) || null };
+      });
+    });
+    if (Object.keys(missing).length) return { ok: false, needsDomFill: true, error: "No booking rows for " + Object.keys(missing).join(", ") };
+    api.records.forEach(function (r) {
+      if (!r.tsbID || isWknd(r.dateStr)) return;
+      var hours = Number(r.hours || 0) > 0 ? String(Number(r.hours)) : null, comment = clean(r.description) || null, o = overrides[r.tsbID];
+      if (o) { hours = o.hours; comment = o.comment; }
+      payload.push({ tsbID: r.tsbID, hours: hours, comment: comment });
+    });
+    return payload.length ? { ok: true, payload: payload } : { ok: false, error: "No editable records for this week" };
+  }
+  function matches(state, tpls) {
+    if (!state || !state.filled) return false;
+    return tpls.every(function (t) { return state.entries.some(function (e) {
+      return (clean(e.taskName).toLowerCase() === clean(t.taskName).toLowerCase() || (tpls.length === 1 && state.entries.length === 1)) &&
+        Math.abs(Number(e.hours || 0) - Number(t.hours || 0)) < 0.001 && clean(e.description) === clean(t.description); }); });
+  }
+  async function readWeeks(mondays) {
+    var out = {};
+    for (var i = 0; i < mondays.length; i++) {
+      var r = await fetchRaw(mondays[i]);
+      out[mondays[i]] = r && r.ok ? { ok: true, data: r.data } : { ok: false, status: r && r.status, error: (r && r.error) || "Week-view API failed" };
+    }
+    return out;
+  }
+  async function execute(items) {
+    var results = [], push = function (date, status, ok, error) { results.push({ date: date, status: status, ok: ok, error: error || "" }); }, groups = {};
+    items.forEach(function (it) { (groups[mondayOf(it.date)] = groups[mondayOf(it.date)] || []).push(it); });
+    for (var monday of Object.keys(groups)) {
+      var list = groups[monday], api = await fetchWeek(monday);
+      if (!api.ok) { list.forEach(function (r) { push(r.date, "error", false, api.status === 401 || api.status === 403 ? "NewersWorld session expired — log in again" : api.error); }); continue; }
+      var changes = {}, pending = [];
+      list.forEach(function (r) {
+        var st = api.states[r.date];
+        if (st && st.onLeave) return push(r.date, "leave_skipped", true);
+        if (st && !st.isEditable) return push(r.date, "locked_skipped", true);
+        if (st && st.filled && !r.wasFilled) return push(r.date, "already_filled", true);
+        var tpl = [{ taskName: r.task, hours: String(r.hours), description: r.description }];
+        changes[r.date] = tpl; pending.push({ date: r.date, tpl: tpl, wasFilled: !!r.wasFilled });
+      });
+      if (!pending.length) continue;
+      var built = buildPayload(api, changes);
+      if (built.ok) {
+        var save = await call({ type: "TIMESHEET_SAVE_API", payload: built.payload });
+        if (!save || !save.ok) { pending.forEach(function (p) { push(p.date, "filled_not_saved", false, (save && save.error) || "Save failed"); }); continue; }
+        await sleep(500);
+      } else if (built.needsDomFill) {
+        var go = await gotoWeek(toNwStr(monday));
+        if (!go.ok) { pending.forEach(function (p) { push(p.date, "error", false, "Could not open the week in this tab"); }); continue; }
+        var any = false;
+        for (var p of pending) {
+          var f = await call({ type: "TIMESHEET_FILL_DATE", dateStr: toNwStr(p.date), tasks: p.tpl, save: false, overwrite: p.wasFilled });
+          if (f && f.ok && !f.alreadyFilled) any = true;
+          else if (f && f.alreadyFilled) { push(p.date, "already_filled", true); p.skip = true; }
+          else { push(p.date, "error", false, (f && f.error) || "Fill failed"); p.skip = true; }
+          await sleep(150);
+        }
+        if (!any) continue;
+        await sleep(500);
+        var sv = await call({ type: "TIMESHEET_SAVE_WEEK" });
+        if (!(sv && sv.ok && sv.status === "CLICKED")) { pending.filter(function (x) { return !x.skip; }).forEach(function (x) { push(x.date, "filled_not_saved", false, "Save button: " + ((sv && (sv.status || sv.error)) || "unknown")); }); continue; }
+        await sleep(2800);
+      } else { pending.forEach(function (p2) { push(p2.date, "error", false, built.error); }); continue; }
+      var check = await fetchWeek(monday);
+      pending.filter(function (x) { return !x.skip; }).forEach(function (x) {
+        if (matches(check.ok ? check.states[x.date] : null, x.tpl)) push(x.date, "filled_saved", true);
+        else push(x.date, "fill_not_persisted", false, check.error || "Portal shows different values after save");
+      });
+    }
+    return results;
+  }
+  async function runOp(type, payload) {
+    try {
+      if (type === "JT_READ") return { ok: true, data: await readWeeks(payload.mondays || []) };
+      if (type === "JT_EXECUTE") return { ok: true, data: await execute(payload.items || []) };
+      return { ok: false, error: "Unknown operation" };
+    } catch (err) { return { ok: false, error: String(err && err.message || err) }; }
+  }
+
+  // ---------- manual mode: copy/paste panel (works even when the pages cannot talk to each other) ----------
+  var pendingReq = null;
+  function showPanel(message) {
+    var p = document.getElementById("jt-panel");
+    if (!p) {
+      p = document.createElement("div"); p.id = "jt-panel";
+      p.style.cssText = "position:fixed;right:16px;bottom:16px;width:400px;z-index:2147483647;background:#111827;color:#fff;font:13px system-ui;padding:14px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.45)";
+      var btn = "background:#4f46e5;color:#fff;border:0;border-radius:8px;padding:6px 12px;margin:6px 6px 0 0;cursor:pointer", ta = "width:100%;height:56px;box-sizing:border-box;background:#0b1020;color:#e5e7eb;border:1px solid #374151;border-radius:8px;margin-top:6px;font:11px monospace";
+      p.innerHTML = '<b>JiraTime agent</b><span id="jt-x" style="float:right;cursor:pointer">✕</span><div id="jt-msg" style="margin:8px 0;opacity:.92"></div>' +
+        '<textarea id="jt-in" placeholder="Paste the request here (Ctrl+V)" style="' + ta + '"></textarea>' +
+        '<button id="jt-read" style="' + btn + '">Read clipboard</button><button id="jt-run" style="' + btn + '" disabled>Run</button>' +
+        '<textarea id="jt-out" readonly placeholder="Result appears here" style="' + ta + '"></textarea><button id="jt-copy" style="' + btn + '">Copy result</button>';
+      document.body.appendChild(p);
+      p.querySelector("#jt-x").onclick = function () { p.remove(); };
+      p.querySelector("#jt-read").onclick = function () { navigator.clipboard.readText().then(loadReq).catch(function () { setMsg("Clipboard blocked — paste into the box instead (Ctrl+V)."); }); };
+      p.querySelector("#jt-in").addEventListener("input", function (e) { loadReq(e.target.value); });
+      p.querySelector("#jt-run").onclick = runPending;
+      p.querySelector("#jt-copy").onclick = function () { var o = p.querySelector("#jt-out"); o.select(); navigator.clipboard.writeText(o.value).then(function () { setMsg("Result copied ✓ — go back to JiraTime and press “Paste result”."); }).catch(function () { document.execCommand("copy"); setMsg("Result selected — press Ctrl+C."); }); };
+    }
+    setMsg(message || "");
+    navigator.clipboard.readText().then(function (t) { if (/^JTREQ:/.test(t || "")) loadReq(t); }).catch(function () { /* needs a click on "Read clipboard" */ });
+  }
+  function setMsg(t) { var m = document.getElementById("jt-msg"); if (m) m.textContent = t; }
+  function loadReq(text) {
+    if (!/^JTREQ:/.test(String(text || "").trim())) return;
+    try { pendingReq = JSON.parse(String(text).trim().slice(6)); } catch (e) { setMsg("That request text is damaged. Copy it again from JiraTime."); return; }
+    var p = document.getElementById("jt-panel"); if (!p) return;
+    p.querySelector("#jt-in").value = String(text).trim().slice(0, 200) + "…";
+    if (pendingReq.type === "JT_READ") { setMsg("Reading " + pendingReq.payload.mondays.length + " week(s) (read-only)…"); runPending(); }
+    else {
+      var n = (pendingReq.payload.items || []).length;
+      setMsg("JiraTime asks to FILL " + n + " day(s) in your NewersWorld timesheet. Check the preview in JiraTime, then press Run.");
+      p.querySelector("#jt-run").disabled = false;
+    }
+  }
+  async function runPending() {
+    if (!pendingReq) return;
+    var req = pendingReq, p = document.getElementById("jt-panel");
+    p.querySelector("#jt-run").disabled = true; setMsg("Working… keep this tab open.");
+    var r = await runOp(req.type, req.payload);
+    var out = "JTRES:" + JSON.stringify({ id: req.id, ok: r.ok, data: r.data, error: r.error });
+    p.querySelector("#jt-out").value = out; pendingReq = null;
+    navigator.clipboard.writeText(out).then(function () { setMsg("Done. Result copied ✓ — go back to JiraTime and press “Paste result”."); }).catch(function () { setMsg("Done. Press “Copy result”, then go back to JiraTime and press “Paste result”."); });
+  }
+
   window.addEventListener("message", function (e) {
     if (e.origin !== APP_ORIGIN || !e.data || !e.source) return;
     if (e.data.jt === "req") st.acked = true;      // the app is talking to us, so the link works
@@ -814,10 +988,12 @@
     var reply = function (res) { e.source.postMessage({ jt: "res", id: id, res: res }, APP_ORIGIN); };
     if (msg.type === "JT_PING") return reply({ ok: true, alive: true, href: location.href.split("?")[0] });
     if (msg.type === "JT_GOTO") { gotoWeek(String(msg.mondayStr || "")).then(reply).catch(function (err) { reply({ ok: false, error: String(err) }); }); return; }
+    if (msg.type === "JT_READ" || msg.type === "JT_EXECUTE") { runOp(msg.type, msg.payload || {}).then(reply); return; }
     if (typeof msg.type !== "string" || msg.type.indexOf("TIMESHEET_") !== 0) return reply({ ok: false, error: "Not allowed" });
     var answered = false;
     var once = function (r) { if (!answered) { answered = true; reply(r); } };
     handlers.forEach(function (h) { try { h(msg, {}, once); } catch (err) { once({ ok: false, error: String(err) }); } });
   });
+  window.__JT_SHOWPANEL = function () { showPanel("Manual mode: copy the request in JiraTime, then press “Read clipboard”."); };
   announce(true);
 })();
