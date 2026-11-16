@@ -68,7 +68,7 @@ async function nwPing() {
   } catch (e) {
     NWA.ready = false;
     NWA.hint = NWA.win && !NWA.win.closed
-      ? "The NewersWorld tab is open but its agent does not answer. Click the JiraTime Agent bookmark in THAT tab (the one opened by the button on this page). If it still fails, delete the old bookmark and drag the ⭐ link again from this page." + (NWA.seen.length ? ` (Messages arrived from: ${[...new Set(NWA.seen)].join(", ")})` : "")
+      ? "Click the JiraTime Agent bookmark in the NewersWorld tab (the one opened by the button on this page)."
       : "No NewersWorld tab is linked. Click “Open NewersWorld”, then click the bookmark in that tab.";
   }
   nwPill();
@@ -77,50 +77,16 @@ async function nwPing() {
 function nwPill() {
   const p = $("#nwBridge");
   p.className = "pill " + (NWA.ready ? "ok" : "warn");
-  p.textContent = NWA.ready ? "● NewersWorld tab connected (live)" : NWT.manual ? "● Manual mode (copy/paste)" : "Agent not connected";
-  if (!NWA.ready && NWT.manual) p.className = "pill ok";
-  $("#nwSetup").classList.toggle("hidden", NWA.ready || NWT.manual);
-  const mt = $("#nwMode"); if (mt) mt.checked = NWT.manual;
+  p.textContent = NWA.ready ? "● NewersWorld tab connected" : "Agent not connected";
+  $("#nwSetup").classList.toggle("hidden", NWA.ready);
 }
 
-// ================= transport: live link, or manual copy/paste =================
-// Some setups block messages between the two tabs. Manual mode moves the same request/answer through the clipboard.
-const NWT = { manual: false };
+// ================= operations run by the agent inside the NewersWorld tab =================
 async function nwOp(type, payload, timeoutMs) {
-  if (!NWT.manual && NWA.ready) {
-    try { const r = await nwCall({ type, payload }, timeoutMs); if (r?.ok) return r.data; throw new Error(r?.error || "NewersWorld agent failed"); }
-    catch (e) { if (!/timeout|not connected/i.test(e.message)) throw e; NWA.ready = false; nwPill(); }
-  }
-  return nwManual(type, payload);
-}
-function nwManual(type, payload) {
-  return new Promise((resolve, reject) => {
-    const id = uid(), req = "JTREQ:" + JSON.stringify({ id, type, payload });
-    const write = type === "JT_EXECUTE";
-    openModal(`<h3>${write ? "Fill NewersWorld — manual step" : "Read NewersWorld — manual step"}</h3>
-      <ol class="steps">
-        <li><button id="mCopy" class="small">📋 Copy request</button> <span id="mCopied" class="muted tiny"></span></li>
-        <li>Switch to your <b>NewersWorld</b> tab, click the <b>JiraTime Agent</b> bookmark, then <b>Read clipboard</b>${write ? " and <b>Run</b>" : ""}.</li>
-        <li>When it says “Result copied”, come back and press <button id="mPaste" class="small">📥 Paste result</button></li>
-      </ol>
-      <textarea id="mBox" class="mbox" placeholder="…or paste the result here (Ctrl+V)"></textarea>
-      <p id="mErr" class="st-failed"></p>
-      <div class="foot"><button id="mCancel">Cancel</button></div>`);
-    const copy = () => navigator.clipboard.writeText(req).then(() => { $("#mCopied").textContent = "copied ✓"; }).catch(() => { $("#mBox").value = req; $("#mBox").select(); $("#mCopied").textContent = "clipboard blocked — the request is in the box below, press Ctrl+C"; });
-    const take = (text) => {
-      text = String(text || "").trim(); if (!text.startsWith("JTRES:")) { if (text) $("#mErr").textContent = "That is not a JiraTime result. Copy it again from the NewersWorld tab."; return; }
-      let r; try { r = JSON.parse(text.slice(6)); } catch { $("#mErr").textContent = "Result text is incomplete. Copy it again."; return; }
-      if (r.id !== id) { $("#mErr").textContent = "This result belongs to an older request. Press “Copy request” again and redo step 2."; return; }
-      closeModal(); window.removeEventListener("focus", onFocus);
-      r.ok ? resolve(r.data) : reject(new Error(r.error || "NewersWorld agent failed"));
-    };
-    const onFocus = () => navigator.clipboard.readText().then((t) => { if (t.startsWith("JTRES:")) take(t); }).catch(() => {});
-    window.addEventListener("focus", onFocus);
-    $("#mCopy").onclick = copy; copy();
-    $("#mPaste").onclick = () => navigator.clipboard.readText().then(take).catch(() => { $("#mErr").textContent = "Clipboard blocked — paste into the box (Ctrl+V)."; $("#mBox").focus(); });
-    $("#mBox").addEventListener("input", (e) => take(e.target.value));
-    $("#mCancel").onclick = () => { closeModal(); window.removeEventListener("focus", onFocus); reject(new Error("Cancelled")); };
-  });
+  if (!NWA.ready && !(await nwPing())) throw new Error(NWA.hint || "Connect the NewersWorld tab first");
+  const r = await nwCall({ type, payload }, timeoutMs);
+  if (!r?.ok) throw new Error(r?.error || "NewersWorld agent failed");
+  return r.data;
 }
 
 // ================= week API (ported from the old extension) =================
@@ -204,7 +170,7 @@ async function nwRead(leaveOnly = false) {
   const from = $("#nwFrom").value, to0 = $("#nwTo").value || todayStr(), to = to0 > todayStr() ? todayStr() : to0;
   if (!from || from > to) { toast("Pick a valid From date (not after today)"); return; }
   if (!S.me) { toast("Connect Jira first"); return; }
-  if (!NWT.manual && !(await nwPing())) { NWT.manual = true; nwPill(); toast("No live link to the NewersWorld tab — using manual copy/paste mode"); }
+  if (!(await nwPing())) { toast(NWA.hint); $("#nwSummary").innerHTML = `<span class="st-failed">${esc(NWA.hint)}</span>`; return; }
   nwReadPrefs(); NW.busy = true; setNwBusy(true, "Reading Jira worklogs…");
   try {
     await ensureRange(from, to);
@@ -313,8 +279,8 @@ async function nwSync() {
     <div class="foot"><button id="nwDone" class="primary">Close</button></div>`);
   $("#nwDone").onclick = closeModal;
   NW.busy = false; setNwBusy(false);
-  if (NWA.ready && !NWT.manual) { await nwRead(); return; }
-  // manual mode: update the table from the results instead of another copy/paste round trip
+  if (NWA.ready) { await nwRead(); return; }
+  // link dropped during the run: update the table from the results
   const byDate = Object.fromEntries(results.map((r) => [r.date, r]));
   for (const row of NW.rows) {
     const r = byDate[row.date]; if (!r) continue;
@@ -340,10 +306,7 @@ async function nwOpened() {
 
 (async function nwInit() {
   NW.prefs = { ...NW.prefs, ...(await store.get("nwPrefs", {})) };
-  NWT.manual = !!(await store.get("nwManual", false));
-  $("#nwBridge").insertAdjacentHTML("afterend", '<label class="check tiny"><input id="nwMode" type="checkbox"> Manual mode (copy/paste)</label>');
-  $("#nwMode").checked = NWT.manual;
-  $("#nwMode").addEventListener("change", (e) => { NWT.manual = e.target.checked; store.set("nwManual", NWT.manual); nwPill(); });
+  localStorage.removeItem("jiratime.nwManual");
   const now = new Date();
   $("#nwFrom").value = ymd(now.getFullYear(), now.getMonth(), 1);
   $("#nwTo").value = todayStr(); $("#nwTo").max = todayStr();
@@ -356,7 +319,7 @@ async function nwOpened() {
 
   $("#nwOpen").onclick = () => {
     if (NWA.ready && NWA.win && !NWA.win.closed) { NWA.win.focus(); toast("Already connected — switched to the NewersWorld tab"); return; }   // do not reload a connected tab
-    NWA.win = window.open(NWA.url(mondayIso(todayStr())), "jt-newersworld");
+    NWA.win = window.open(NWA.url(mondayIso(todayStr())), "jt-nw-" + location.host.replace(/[^a-z0-9]/gi, "-"));
     nwWatch(NWA.win);
   };
   // Opened by the agent from inside NewersWorld ("Open JiraTime (connected)"): connect to that tab.

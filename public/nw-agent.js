@@ -23,12 +23,12 @@
       st.acked = false;
       say("Connecting to " + host + "…");
       setTimeout(function () {
-        if (!st.acked) showPanel("This tab is not linked to JiraTime (it was opened from somewhere else). Click the button below: JiraTime opens connected to this tab.");
+        if (!st.acked) showOpenButton();
       }, 3500);
     }
     if (t && !t.closed) t.postMessage({ jt: "ready" }, APP_ORIGIN);   // the app can also reach us without this (it pings the tab it opened)
   }
-  if (window.__JT_AGENT_LOADED) { announce(true); if (document.getElementById("jt-panel")) window.__JT_SHOWPANEL && window.__JT_SHOWPANEL(); return; }
+  if (window.__JT_AGENT_LOADED && window.__JT_ANNOUNCE) { window.__JT_ANNOUNCE(true); return; }
   window.__JT_AGENT_LOADED = true;
   // Keep re-announcing quietly, so the app reconnects by itself after it was reloaded.
   st.timer = setInterval(function () { announce(false); }, 5000);
@@ -934,63 +934,22 @@
     } catch (err) { return { ok: false, error: String(err && err.message || err) }; }
   }
 
-  // ---------- manual mode: copy/paste panel (works even when the pages cannot talk to each other) ----------
-  var pendingReq = null;
-  function showPanel(message) {
-    var p = document.getElementById("jt-panel");
-    if (!p) {
-      p = document.createElement("div"); p.id = "jt-panel";
-      p.style.cssText = "position:fixed;right:16px;bottom:16px;width:400px;z-index:2147483647;background:#111827;color:#fff;font:13px system-ui;padding:14px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.45)";
-      var btn = "background:#4f46e5;color:#fff;border:0;border-radius:8px;padding:6px 12px;margin:6px 6px 0 0;cursor:pointer", ta = "width:100%;height:56px;box-sizing:border-box;background:#0b1020;color:#e5e7eb;border:1px solid #374151;border-radius:8px;margin-top:6px;font:11px monospace";
-      p.innerHTML = '<b>JiraTime agent</b><span id="jt-x" style="float:right;cursor:pointer">✕</span><div id="jt-msg" style="margin:8px 0;opacity:.92"></div>' +
-        '<button id="jt-open" style="' + btn + ';background:#16a34a;font-weight:600">↗ Open JiraTime (connected)</button>' +
-        '<details style="margin-top:8px"><summary style="cursor:pointer;opacity:.8">Manual copy/paste mode</summary>' +
-        '<textarea id="jt-in" placeholder="Paste the request here (Ctrl+V)" style="' + ta + '"></textarea>' +
-        '<button id="jt-read" style="' + btn + '">Read clipboard</button><button id="jt-run" style="' + btn + '" disabled>Run</button>' +
-        '<textarea id="jt-out" readonly placeholder="Result appears here" style="' + ta + '"></textarea><button id="jt-copy" style="' + btn + '">Copy result</button></details>';
-      document.body.appendChild(p);
-      p.querySelector("#jt-x").onclick = function () { p.remove(); };
-      p.querySelector("#jt-open").onclick = function () {
-        var w = window.open(APP_ORIGIN + "/#newersworld", "_blank");     // the new JiraTime tab has THIS tab as its opener
-        if (!w) setMsg("Pop-up blocked — allow pop-ups for newersworld.tothenew.com and click again.");
-        else setMsg("JiraTime opened. Waiting for it to connect…");
-      };
-      p.querySelector("#jt-read").onclick = function () { navigator.clipboard.readText().then(loadReq).catch(function () { setMsg("Clipboard blocked — paste into the box instead (Ctrl+V)."); }); };
-      p.querySelector("#jt-in").addEventListener("input", function (e) { loadReq(e.target.value); });
-      p.querySelector("#jt-run").onclick = runPending;
-      p.querySelector("#jt-copy").onclick = function () { var o = p.querySelector("#jt-out"); o.select(); navigator.clipboard.writeText(o.value).then(function () { setMsg("Result copied ✓ — go back to JiraTime and press “Paste result”."); }).catch(function () { document.execCommand("copy"); setMsg("Result selected — press Ctrl+C."); }); };
-    }
-    setMsg(message || "");
-    navigator.clipboard.readText().then(function (t) { if (/^JTREQ:/.test(t || "")) loadReq(t); }).catch(function () { /* needs a click on "Read clipboard" */ });
-  }
-  function setMsg(t) { var m = document.getElementById("jt-msg"); if (m) m.textContent = t; }
-  function loadReq(text) {
-    if (!/^JTREQ:/.test(String(text || "").trim())) return;
-    try { pendingReq = JSON.parse(String(text).trim().slice(6)); } catch (e) { setMsg("That request text is damaged. Copy it again from JiraTime."); return; }
-    var p = document.getElementById("jt-panel"); if (!p) return;
-    p.querySelector("#jt-in").value = String(text).trim().slice(0, 200) + "…";
-    if (pendingReq.type === "JT_READ") { setMsg("Reading " + pendingReq.payload.mondays.length + " week(s) (read-only)…"); runPending(); }
-    else {
-      var n = (pendingReq.payload.items || []).length;
-      setMsg("JiraTime asks to FILL " + n + " day(s) in your NewersWorld timesheet. Check the preview in JiraTime, then press Run.");
-      p.querySelector("#jt-run").disabled = false;
-    }
-  }
-  async function runPending() {
-    if (!pendingReq) return;
-    var req = pendingReq, p = document.getElementById("jt-panel");
-    p.querySelector("#jt-run").disabled = true; setMsg("Working… keep this tab open.");
-    var r = await runOp(req.type, req.payload);
-    var out = "JTRES:" + JSON.stringify({ id: req.id, ok: r.ok, data: r.data, error: r.error });
-    p.querySelector("#jt-out").value = out; pendingReq = null;
-    navigator.clipboard.writeText(out).then(function () { setMsg("Done. Result copied ✓ — go back to JiraTime and press “Paste result”."); }).catch(function () { setMsg("Done. Press “Copy result”, then go back to JiraTime and press “Paste result”."); });
+  // Not linked (this tab was opened from somewhere else): one button opens JiraTime linked to this tab.
+  function showOpenButton() {
+    if (document.getElementById("jt-open")) return;
+    var d = document.createElement("div"); d.id = "jt-open";
+    d.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#111827;color:#fff;padding:12px 14px;border-radius:12px;font:13px system-ui;box-shadow:0 8px 24px rgba(0,0,0,.4);max-width:340px";
+    d.innerHTML = '<div style="margin-bottom:8px">This tab is not linked to JiraTime.</div><button style="background:#16a34a;color:#fff;border:0;border-radius:8px;padding:7px 12px;cursor:pointer;font-weight:600">↗ Open JiraTime here</button> <span style="cursor:pointer;opacity:.7;margin-left:8px">✕</span>';
+    d.querySelector("button").onclick = function () { window.open(APP_ORIGIN + "/#newersworld", "_blank"); d.remove(); };
+    d.querySelector("span").onclick = function () { d.remove(); };
+    document.body.appendChild(d);
   }
 
   window.addEventListener("message", function (e) {
     if (e.origin !== APP_ORIGIN || !e.data || !e.source) return;
     if (e.data.jt === "req" && !st.acked) {        // the app is talking to us, so the link works
       st.acked = true; say("JiraTime agent connected ✓ (" + host + ")");
-      var pn = document.getElementById("jt-panel"); if (pn && !pendingReq) pn.remove();
+      var ob = document.getElementById("jt-open"); if (ob) ob.remove();
     }
     if (e.data.jt === "ack") { if (!st.acked) { st.acked = true; say("JiraTime agent connected ✓ (" + host + ")"); } return; }
     if (e.data.jt !== "req") return;
@@ -1004,6 +963,6 @@
     var once = function (r) { if (!answered) { answered = true; reply(r); } };
     handlers.forEach(function (h) { try { h(msg, {}, once); } catch (err) { once({ ok: false, error: String(err) }); } });
   });
-  window.__JT_SHOWPANEL = function () { showPanel("Manual mode: copy the request in JiraTime, then press “Read clipboard”."); };
+  window.__JT_ANNOUNCE = announce;
   announce(true);
 })();
