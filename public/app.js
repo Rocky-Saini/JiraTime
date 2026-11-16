@@ -70,12 +70,20 @@ const API = {
   addWorklog: (id) => `/rest/api/2/issue/${id}/worklog?adjustEstimate=leave`,
   delWorklog: (id, wid) => `/rest/api/2/issue/${id}/worklog/${wid}?adjustEstimate=leave`,
 };
+// Jira credentials live only in this browser: sessionStorage by default, localStorage if "remember" is ticked.
+const creds = {
+  get() { try { return JSON.parse(sessionStorage.getItem("jiratime.creds") || localStorage.getItem("jiratime.creds") || "null"); } catch { return null; } },
+  set(c, remember) { this.clear(); (remember ? localStorage : sessionStorage).setItem("jiratime.creds", JSON.stringify(c)); },
+  clear() { sessionStorage.removeItem("jiratime.creds"); localStorage.removeItem("jiratime.creds"); },
+};
 class ApiError extends Error { constructor(msg, status) { super(msg); this.status = status; } }
 
 async function jira(path, opts = {}) {
   let res;
+  const c = opts.creds || creds.get();
+  if (!c) throw new ApiError("Jira not configured", 412);
   try {
-    res = await fetch("/jira" + path, { ...opts, headers: { Accept: "application/json", ...(opts.body ? { "Content-Type": "application/json" } : {}) } });
+    res = await fetch("/jira" + path, { ...opts, headers: { Accept: "application/json", "X-Jira-Base": c.base, "X-Jira-Email": c.email, "X-Jira-Token": c.token, ...(opts.body ? { "Content-Type": "application/json" } : {}) } });
   } catch (e) { const err = new ApiError("Network error: " + e.message, 0); err.uncertain = true; throw err; }
   if (res.status === 412) throw new ApiError("Jira not configured", 412);
   if (res.status === 401) throw new ApiError("Jira rejected the credentials (API token invalid or revoked)", 401);
@@ -89,32 +97,37 @@ async function jira(path, opts = {}) {
 }
 
 function setupDialog(message) {
+  const c = creds.get();
   openModal(`
     <h3>Connect Jira</h3>
-    <p class="muted">${esc(message || "Create an API token at id.atlassian.com → Security → API tokens. It is stored only in the local .env file on this computer.")}</p>
+    <p class="muted">${esc(message || "Create an API token at id.atlassian.com → Security → API tokens. It stays in this browser only; the server never stores it.")}</p>
     <div class="form">
-      <label>Jira site URL <input id="suBase" placeholder="https://yourcompany.atlassian.net" value="${esc(S.base || "")}"></label>
-      <label>Atlassian email <input id="suEmail" type="email" value="${esc(S.email || "")}"></label>
+      <label>Jira site URL <input id="suBase" placeholder="https://yourcompany.atlassian.net" value="${esc(c?.base || S.base || "")}"></label>
+      <label>Atlassian email <input id="suEmail" type="email" value="${esc(c?.email || S.email || "")}"></label>
       <label>API token <input id="suToken" type="password" autocomplete="off"></label>
+      <label class="check"><input id="suRemember" type="checkbox" ${localStorage.getItem("jiratime.creds") ? "checked" : ""}> Remember on this device <span class="muted tiny">(otherwise forgotten when you close the tab)</span></label>
       <p id="suErr" class="st-failed"></p>
     </div>
     <div class="foot"><button id="suCancel">Cancel</button><button id="suGo" class="primary">Connect</button></div>`);
   $("#suCancel").onclick = closeModal;
   $("#suGo").onclick = async () => {
     $("#suErr").textContent = "";
-    const r = await fetch("/api/setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ base: $("#suBase").value, email: $("#suEmail").value, token: $("#suToken").value }) });
-    const j = await r.json();
-    if (!r.ok) { $("#suErr").textContent = j.error; return; }
+    const next = { base: $("#suBase").value.trim().replace(/\/+$/, ""), email: $("#suEmail").value.trim(), token: $("#suToken").value.trim() };
+    if (!/^https:\/\/[a-z0-9-]+\.atlassian\.net$/i.test(next.base)) { $("#suErr").textContent = "Site URL must look like https://name.atlassian.net"; return; }
+    if (!next.email || !next.token) { $("#suErr").textContent = "Email and API token are required"; return; }
+    try { await jira(API.myself(), { creds: next }); }
+    catch (e) { $("#suErr").textContent = e.status === 401 ? "Jira rejected these credentials" : e.message; return; }
+    creds.set(next, $("#suRemember").checked);
     closeModal(); S.months = {}; toast("Connected"); boot();
   };
 }
 
 async function checkConnection() {
   const el = $("#conn");
-  const st = await fetch("/api/status").then((r) => r.json()).catch(() => ({}));
-  S.base = st.base; S.email = st.email;
+  const c = creds.get();
+  S.base = c?.base; S.email = c?.email;
   try {
-    if (!st.configured) throw new ApiError("Jira not configured", 412);
+    if (!c) throw new ApiError("Jira not configured", 412);
     S.me = await jira(API.myself());
     el.className = "pill ok"; el.textContent = "● Jira connected";
     $("#user").textContent = S.me.displayName;
@@ -687,9 +700,9 @@ function printTimesheet() {
   w.document.write(`<!doctype html><title>Timesheet ${MONTHS[S.m]} ${S.y}</title><style>body{font:13px system-ui;margin:30px}table{border-collapse:collapse;width:100%;margin-bottom:20px}td,th{border:1px solid #bbb;padding:5px 8px;text-align:left}th{background:#eee}h1{font-size:20px}</style>
   <h1>Timesheet — ${esc(S.me?.displayName || "")}<br><small>${MONTHS[S.m]} ${S.y}</small></h1>
   <h3>Summary by issue</h3><table><tr><th>Issue</th><th>Hours</th></tr>${Object.entries(per).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${fmtH(v)}</td></tr>`).join("")}<tr><th>Total</th><th>${fmtH(total)}</th></tr></table>
-  <h3>Daily detail</h3><table><tr><th>Date</th><th>Issue</th><th>Hours</th><th>Comment</th></tr>${rows.map((e) => `<tr><td>${prettyDate(e.date)}</td><td>${esc(e.issueKey)}</td><td>${fmtH(e.secs)}</td><td>${esc(e.comment)}</td></tr>`).join("")}</table>
-  <script>window.onload=()=>window.print()<\/script>`);
+  <h3>Daily detail</h3><table><tr><th>Date</th><th>Issue</th><th>Hours</th><th>Comment</th></tr>${rows.map((e) => `<tr><td>${prettyDate(e.date)}</td><td>${esc(e.issueKey)}</td><td>${fmtH(e.secs)}</td><td>${esc(e.comment)}</td></tr>`).join("")}</table>`);
   w.document.close();
+  setTimeout(() => w.print(), 400);
 }
 
 // ================= history & undo =================
@@ -835,7 +848,7 @@ async function init() {
     await store.set("settings", S.settings); toast("Settings saved"); fillSettings(); renderAll();
   };
   $("#setReconnect").onclick = () => setupDialog();
-  $("#setLogout").onclick = async () => { await fetch("/api/logout", { method: "POST" }); S.months = {}; toast("Credentials removed"); boot(); };
+  $("#setLogout").onclick = () => { creds.clear(); S.me = null; S.months = {}; toast("Credentials removed from this browser"); boot(); };
   $("#hAdd").onclick = () => { const d = $("#hDate").value; if (!d) return; S.holidays[d] = { label: $("#hLabel").value || $("#hType").value, type: $("#hType").value }; saveHolidays(); };
   $("#hAddRange").onclick = () => {
     const a = $("#hFrom").value, b = $("#hTo").value; if (!a || !b || a > b) { toast("Pick a valid from/to range"); return; }

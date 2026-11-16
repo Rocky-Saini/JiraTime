@@ -341,7 +341,7 @@ async function nwOpened() {
 
   $("#nwOpen").onclick = () => { NWA.win = window.open(NWA.url(mondayIso(todayStr())), "jt-newersworld"); };
   try {
-    const code = await fetch("/nw-agent.js").then((r) => r.text());
+    const code = (await fetch("/nw-agent.js").then((r) => r.text())).replace(/__APP_ORIGIN__/g, location.origin);
     $("#nwBm").setAttribute("href", "javascript:" + encodeURIComponent(code));
     $("#nwBm").addEventListener("click", (e) => { e.preventDefault(); toast("Don't click here — drag this to your bookmarks bar, then click it inside the NewersWorld tab."); });
     $("#nwCopy").onclick = async () => { await navigator.clipboard.writeText(code); toast("Script copied. Paste it in the NewersWorld tab's DevTools console (type “allow pasting” first)."); };
