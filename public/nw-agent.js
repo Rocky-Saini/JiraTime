@@ -6,21 +6,33 @@
   "use strict";
   var APP_ORIGIN = "__APP_ORIGIN__";
   var toApp = function () { return window.opener || (window.parent !== window ? window.parent : null); };
-  function say(text) {
+  var st = window.__JT_STATE = window.__JT_STATE || { acked: false, timer: null };
+  var host = APP_ORIGIN.replace(/^https?:\/\//, "");
+  function say(text, bad) {
     try {
       var d = document.createElement("div");
       d.textContent = text;
-      d.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#4f46e5;color:#fff;padding:10px 16px;border-radius:10px;font:14px system-ui;box-shadow:0 6px 20px rgba(0,0,0,.3)";
-      document.body.appendChild(d); setTimeout(function () { d.remove(); }, 3500);
+      d.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:420px;background:" + (bad ? "#b91c1c" : "#4f46e5") + ";color:#fff;padding:10px 16px;border-radius:10px;font:14px system-ui;box-shadow:0 6px 20px rgba(0,0,0,.3)";
+      document.body.appendChild(d); setTimeout(function () { d.remove(); }, bad ? 9000 : 3500);
     } catch (e) { /* ignore */ }
   }
-  function announce() {
+  // Tell the JiraTime page we are here. The page answers with "ack"; only then do we claim success.
+  function announce(first) {
     var t = toApp();
-    if (t) { t.postMessage({ jt: "ready" }, APP_ORIGIN); say("JiraTime agent connected ✓"); }
-    else say("Open this tab from JiraTime (NewersWorld page → Open NewersWorld button), then click the bookmark again.");
+    if (!t || t.closed) { if (first) say("This tab was not opened from JiraTime. Go to JiraTime → NewersWorld Timesheet → \"Open NewersWorld\", then click the bookmark in that new tab.", true); return; }
+    t.postMessage({ jt: "ready" }, APP_ORIGIN);
+    if (first) {
+      st.acked = false;
+      say("Connecting to " + host + "…");
+      setTimeout(function () {
+        if (!st.acked) say("Could not reach JiraTime at " + host + ". This bookmark was made for a different address. Delete it and drag the ⭐ link again from the JiraTime page you are using.", true);
+      }, 2500);
+    }
   }
-  if (window.__JT_AGENT_LOADED) { announce(); return; }
+  if (window.__JT_AGENT_LOADED) { announce(true); return; }
   window.__JT_AGENT_LOADED = true;
+  // Keep re-announcing quietly, so the app reconnects by itself after it was reloaded.
+  st.timer = setInterval(function () { announce(false); }, 5000);
 
   var handlers = [];
   var chrome = { runtime: { onMessage: { addListener: function (f) { handlers.push(f); } } } };
@@ -795,7 +807,9 @@
   }
 
   window.addEventListener("message", function (e) {
-    if (e.origin !== APP_ORIGIN || !e.data || e.data.jt !== "req" || !e.source) return;
+    if (e.origin !== APP_ORIGIN || !e.data || !e.source) return;
+    if (e.data.jt === "ack") { if (!st.acked) { st.acked = true; say("JiraTime agent connected ✓ (" + host + ")"); } return; }
+    if (e.data.jt !== "req") return;
     var id = e.data.id, msg = e.data.msg || {};
     var reply = function (res) { e.source.postMessage({ jt: "res", id: id, res: res }, APP_ORIGIN); };
     if (msg.type === "JT_PING") return reply({ ok: true, alive: true, href: location.href.split("?")[0] });
@@ -805,5 +819,5 @@
     var once = function (r) { if (!answered) { answered = true; reply(r); } };
     handlers.forEach(function (h) { try { h(msg, {}, once); } catch (err) { once({ ok: false, error: String(err) }); } });
   });
-  announce();
+  announce(true);
 })();

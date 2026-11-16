@@ -14,7 +14,10 @@ const NW = { plan: null, dates: [], rows: [], asked: false, busy: false, prefs: 
 // ================= agent channel (postMessage) =================
 window.addEventListener("message", (e) => {
   if (e.origin !== NWA.origin || !e.data || e.data.jt !== "ready") return;
-  NWA.win = e.source; NWA.ready = true; nwPill(); toast("NewersWorld agent connected ✓");
+  const first = !NWA.ready;
+  NWA.win = e.source; NWA.ready = true; nwPill();
+  e.source.postMessage({ jt: "ack" }, NWA.origin);          // lets the agent confirm the link works both ways
+  if (first) toast("NewersWorld agent connected ✓");
 });
 
 function nwCall(msg, timeoutMs = 30000) {
@@ -33,7 +36,19 @@ function nwCall(msg, timeoutMs = 30000) {
 }
 
 async function nwPing() {
-  try { NWA.ready = !!(await nwCall({ type: "JT_PING" }, 1500))?.ok; } catch { NWA.ready = false; }
+  // After an app reload the agent re-announces within ~5s; wait for that before giving up.
+  if (!NWA.win || NWA.win.closed) {
+    NWA.ready = false;
+    const t0 = Date.now();
+    while ((!NWA.win || NWA.win.closed) && Date.now() - t0 < 6000) await sleep(200);
+  }
+  try { NWA.ready = !!(await nwCall({ type: "JT_PING" }, 2500))?.ok; NWA.hint = ""; }
+  catch (e) {
+    NWA.ready = false;
+    NWA.hint = NWA.win && !NWA.win.closed
+      ? "The NewersWorld tab is open but its agent does not answer. Click the JiraTime Agent bookmark in that tab again. If it still fails, the bookmark belongs to another address: delete it and drag the ⭐ link from THIS page."
+      : "No NewersWorld tab is linked. Click “Open NewersWorld”, then click the bookmark in that tab.";
+  }
   nwPill();
   return NWA.ready;
 }
@@ -165,7 +180,7 @@ async function nwRead(leaveOnly = false) {
   const from = $("#nwFrom").value, to0 = $("#nwTo").value || todayStr(), to = to0 > todayStr() ? todayStr() : to0;
   if (!from || from > to) { toast("Pick a valid From date (not after today)"); return; }
   if (!S.me) { toast("Connect Jira first"); return; }
-  if (!(await nwPing())) { toast("Connect the NewersWorld tab first (steps above)"); return; }
+  if (!(await nwPing())) { toast(NWA.hint || "Connect the NewersWorld tab first (steps above)"); $("#nwSummary").innerHTML = `<span class="st-failed">${esc(NWA.hint || "")}</span>`; return; }
   nwReadPrefs(); NW.busy = true; setNwBusy(true, "Reading Jira worklogs…");
   try {
     await ensureRange(from, to);
@@ -339,12 +354,16 @@ async function nwOpened() {
   ["nwHours", "nwComments", "nwOverwrite", "nwTask"].forEach((id) => $("#" + id).addEventListener("change", () => { nwReadPrefs(); nwBuildRows(); }));
   document.querySelector('.nav[data-view="nw"]').addEventListener("click", nwOpened);
 
-  $("#nwOpen").onclick = () => { NWA.win = window.open(NWA.url(mondayIso(todayStr())), "jt-newersworld"); };
+  $("#nwOpen").onclick = () => {
+    if (NWA.ready && NWA.win && !NWA.win.closed) { NWA.win.focus(); toast("Already connected — switched to the NewersWorld tab"); return; }   // do not reload a connected tab
+    NWA.win = window.open(NWA.url(mondayIso(todayStr())), "jt-newersworld");
+  };
   try {
     const code = (await fetch("/nw-agent.js").then((r) => r.text())).replace(/__APP_ORIGIN__/g, location.origin);
     $("#nwBm").setAttribute("href", "javascript:" + encodeURIComponent(code));
     $("#nwBm").addEventListener("click", (e) => { e.preventDefault(); toast("Don't click here — drag this to your bookmarks bar, then click it inside the NewersWorld tab."); });
     $("#nwCopy").onclick = async () => { await navigator.clipboard.writeText(code); toast("Script copied. Paste it in the NewersWorld tab's DevTools console (type “allow pasting” first)."); };
   } catch { /* offline */ }
+  $("#nwSetup").insertAdjacentHTML("beforeend", `<p class="muted tiny" style="margin:8px 0 0">This bookmark only works for <b>${esc(location.origin)}</b>. Made it earlier for another address (e.g. localhost)? Delete it and drag the ⭐ link again from this page.</p>`);
   nwPill();
 })();
