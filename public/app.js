@@ -356,7 +356,7 @@ function renderCalendar() {
     const cls = ["day", off && "off", S.selected.has(s) && "selected", !S.selected.has(s) && st, failed && "failed", s === todayStr() && "today"].filter(Boolean).join(" ");
     html += `<div class="${cls}" data-d="${s}" ${hol ? `title="${esc(hol.label)}"` : ""}><span class="n">${d}</span><button class="dinfo" data-info="${s}" title="Day details" tabindex="-1">⋯</button><span class="h">${hol ? "🏖 " + esc(hol.label).slice(0, 8) : secs ? fmtH(secs) : ""}</span></div>`;
   }
-  $("#calendar").innerHTML = html;
+  $("#calendar").innerHTML = html; hideDayTip();
   renderStats(data); renderBanner(data); renderSelection();
 }
 
@@ -406,6 +406,36 @@ function toggleDate(d, shift) {
   } else S.selected.has(d) ? S.selected.delete(d) : S.selected.add(d);
   S.lastClicked = d; renderCalendar();
 }
+// Hover a day: which Jira issues, how many hours each.
+function dayTipHtml(date) {
+  const md = monthView(date.slice(0, 7)), day = md.byDate[date], hol = holidayOf(date);
+  const title = new Date(date + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" });
+  if (!day?.entries?.length) return hol ? `<b>${esc(title)}</b><div class="tip-hol">🏖 ${esc(hol.label)}</div>` : "";
+  const by = new Map();
+  for (const e of day.entries) {
+    const g = by.get(e.issueId) || { key: e.issueKey, summary: md.issues[e.issueId]?.summary || "", secs: 0, comments: [] };
+    g.secs += e.secs; if (e.comment && !g.comments.includes(e.comment)) g.comments.push(e.comment);
+    by.set(e.issueId, g);
+  }
+  const rows = [...by.values()].sort((a, b) => b.secs - a.secs);
+  return `<div class="tip-h"><b>${esc(title)}</b><span>${fmtH(day.secs)} / ${S.settings.target}h</span></div>` +
+    (hol ? `<div class="tip-hol">🏖 ${esc(hol.label)}</div>` : "") +
+    rows.map((g) => `<div class="tip-r"><span class="tip-k">${esc(g.key)}</span><span class="tip-s">${esc(g.summary.slice(0, 48))}${g.comments.length ? `<small>${esc(g.comments.join(" · ").slice(0, 70))}</small>` : ""}</span><b>${fmtH(g.secs)}</b></div>`).join("");
+}
+const TIP = { el: null, date: null };
+function showDayTip(cell) {
+  const html = dayTipHtml(cell.dataset.d);
+  if (!html) return hideDayTip();
+  if (!TIP.el) { TIP.el = document.createElement("div"); TIP.el.className = "daytip"; TIP.el.setAttribute("role", "tooltip"); document.body.appendChild(TIP.el); }
+  TIP.date = cell.dataset.d; TIP.el.innerHTML = html; TIP.el.style.display = "block";
+  const r = cell.getBoundingClientRect(), t = TIP.el.getBoundingClientRect(), gap = 8;
+  let left = r.left + r.width / 2 - t.width / 2, top = r.bottom + gap;
+  if (top + t.height > innerHeight - 8) top = r.top - t.height - gap;                 // flip above when no room below
+  left = Math.max(8, Math.min(left, innerWidth - t.width - 8));
+  TIP.el.style.left = left + "px"; TIP.el.style.top = Math.max(8, top) + "px";
+}
+function hideDayTip() { if (TIP.el) TIP.el.style.display = "none"; TIP.date = null; }
+
 // Drag across days to select a range; starting on a selected day unselects the range instead.
 const DRAG = { on: false, start: null, cur: null, moved: false, shift: false, mode: "add" };
 function rangeDates(a, b) {
@@ -968,11 +998,18 @@ async function init() {
   // calendar
   // click = toggle, drag = range, ⋯ = day details
   const cal = $("#calendar");
-  cal.addEventListener("click", (e) => { const b = e.target.closest(".dinfo"); if (b) window.openDay?.(b.dataset.info); });
+  cal.addEventListener("click", (e) => { const b = e.target.closest(".dinfo"); if (b) { hideDayTip(); window.openDay?.(b.dataset.info); } });
+  cal.addEventListener("pointerover", (e) => {
+    if (e.pointerType !== "mouse" || DRAG.on) return;
+    const c = e.target.closest(".day[data-d]"); if (c && c.dataset.d !== TIP.date) showDayTip(c);
+  });
+  cal.addEventListener("pointerleave", hideDayTip);
+  window.addEventListener("scroll", hideDayTip, { passive: true });
   cal.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 || e.target.closest(".dinfo")) return;
     const d = e.target.closest(".day[data-d]"); if (!d) return;
     if (e.pointerType === "mouse") e.preventDefault();
+    hideDayTip();
     Object.assign(DRAG, { on: true, start: d.dataset.d, cur: d.dataset.d, moved: false, shift: e.shiftKey, mode: S.selected.has(d.dataset.d) ? "del" : "add" });
   });
   document.addEventListener("pointermove", (e) => {

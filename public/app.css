@@ -200,3 +200,9 @@ button.primary-s{background:linear-gradient(135deg,var(--acc),var(--acc2));borde
   .wz-row{grid-template-columns:24px minmax(0,1fr)}.wz-row>.tiss,.wz-row>.wzH{grid-column:2}
   .today-card .tc-r{width:100%}
 }
+/* ---- calendar hover: hours per issue ---- */
+.daytip{position:fixed;z-index:80;display:none;max-width:380px;min-width:240px;background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:10px 12px;box-shadow:0 14px 34px rgba(0,0,0,.45);font-size:12px;pointer-events:none}
+.tip-h{display:flex;justify-content:space-between;gap:12px;margin-bottom:6px}.tip-h span{color:var(--mut)}
+.tip-r{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:baseline;padding:4px 0;border-top:1px solid var(--bd)}
+.tip-k{font-weight:600;color:var(--acc);white-space:nowrap}.tip-s{color:var(--tx);overflow:hidden}.tip-s small{display:block;color:var(--mut)}
+.tip-r b{white-space:nowrap}.tip-hol{color:var(--mut);margin-bottom:4px}
