@@ -1,6 +1,6 @@
 "use strict";
-/* JiraTime - bulk worklog filler (web UI). Talks to the local server.js proxy;
-   Jira credentials never reach the browser. */
+/* JiraTime - bulk worklog filler (web UI). Calls Jira through the /jira proxy (Netlify function or the
+   local server.js). Credentials stay in this browser and are sent per request only. */
 
 // ================= helpers =================
 const $ = (s, r = document) => r.querySelector(s);
@@ -24,6 +24,22 @@ function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.re
 function openModal(html) { $("#modalBox").innerHTML = html; $("#modal").classList.remove("hidden"); }
 function closeModal() { $("#modal").classList.add("hidden"); }
 const modalOpen = () => !$("#modal").classList.contains("hidden");
+
+// ================= small event bus (lets the add-on modules react) =================
+const JT = {
+  ready: false,
+  on(evt, fn) { document.addEventListener("jt:" + evt, (e) => fn(e.detail)); },
+  emit(evt, detail) { document.dispatchEvent(new CustomEvent("jt:" + evt, { detail })); },
+  onReady(fn) { this.on("ready", fn); if (this.ready) fn(); },
+};
+/** Run fn once every <script> on the page has executed. */
+const afterScripts = (fn) => (document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", fn, { once: true }) : fn());
+/** Run fn over items with at most n calls in flight; keeps the result order. */
+async function pool(items, n, fn) {
+  const out = new Array(items.length); let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (next < items.length) { const i = next++; out[i] = await fn(items[i], i); } }));
+  return out;
+}
 
 /** "2h", "1h 30m", "90m", "1.5h", "2" (hours) -> seconds (0 if invalid) */
 function parseDuration(str) {
@@ -56,9 +72,9 @@ const S = {
   y: new Date().getFullYear(), m: new Date().getMonth(),
   selected: new Set(), lastClicked: null,
   rows: [], months: {}, failed: new Set(),
-  templates: [], plans: [], holidays: {}, pinned: [], comments: [], history: [],
+  holidays: {}, pinned: [], comments: [], history: [],
   week: mondayOf(new Date()), weekInputs: {}, weekComments: {}, weekIssues: [],
-  lastSync: 0, prevPattern: null,
+  lastSync: 0, prevPattern: null, loadErr: {},
 };
 
 // ================= Jira API adapter =================
@@ -69,6 +85,9 @@ const API = {
   issueWorklogs: (id) => `/rest/api/2/issue/${id}/worklog?startAt=0&maxResults=5000`,
   addWorklog: (id) => `/rest/api/2/issue/${id}/worklog?adjustEstimate=leave`,
   delWorklog: (id, wid) => `/rest/api/2/issue/${id}/worklog/${wid}?adjustEstimate=leave`,
+  editWorklog: (id, wid) => `/rest/api/2/issue/${id}/worklog/${wid}?adjustEstimate=leave`,
+  myOpen: () => `/rest/api/3/search/jql?jql=${encodeURIComponent("assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC")}&maxResults=100&fields=summary,status`,
+  issueByKey: (key) => `/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status`,
 };
 // Jira credentials live only in this browser: sessionStorage by default, localStorage if "remember" is ticked.
 const creds = {
@@ -79,6 +98,17 @@ const creds = {
 class ApiError extends Error { constructor(msg, status) { super(msg); this.status = status; } }
 
 async function jira(path, opts = {}) {
+  const read = !opts.method || opts.method === "GET";
+  for (let attempt = 1; ; attempt++) {
+    try { return await jiraOnce(path, opts); }
+    catch (e) {
+      const transient = [429, 502, 503, 504].includes(e.status) || (e.status === 0 && e.uncertain);
+      if (!read || !transient || attempt >= 3) throw e;
+      await sleep(attempt * 1200);
+    }
+  }
+}
+async function jiraOnce(path, opts) {
   let res;
   const c = opts.creds || creds.get();
   if (!c) throw new ApiError("Jira not configured", 412);
@@ -136,17 +166,105 @@ async function checkConnection() {
     S.me = null; el.className = "pill bad";
     el.innerHTML = `● ${esc(e.status === 412 ? "Not connected" : e.message)} — <a href="#" id="connectLink">connect Jira</a>`;
     $("#connectLink").addEventListener("click", (ev) => { ev.preventDefault(); setupDialog(); });
-    if (e.status === 412) setupDialog();
+    if (e.status === 412) afterScripts(() => { if (!window.JTW?.autoStart?.()) setupDialog(); });
     return false;
   }
 }
+
+// ================= local caches (this browser, per Jira account) =================
+// Month worklogs and an issue index are kept in localStorage so the calendar and the issue search show
+// results at once; fresh data is still fetched in the background. Never used to decide duplicates.
+const cacheNs = () => { const c = creds.get(); return c ? `${c.base}|${c.email}`.toLowerCase() : ""; };
+const cache = {
+  k: (name) => "jiratime.cache." + name,
+  get(name) { try { const v = JSON.parse(localStorage.getItem(this.k(name)) || "null"); return v && v.ns && v.ns === cacheNs() ? v : null; } catch { return null; } },
+  set(name, data) { if (!cacheNs()) return; try { localStorage.setItem(this.k(name), JSON.stringify({ ns: cacheNs(), at: Date.now(), data })); } catch { /* storage full: the cache is optional */ } },
+  clearAll() { Object.keys(localStorage).filter((k) => k.startsWith("jiratime.cache.")).forEach((k) => localStorage.removeItem(k)); },
+};
+
+const packMonth = (d) => ({ issues: d.issues, entries: Object.values(d.byDate).flatMap((x) => x.entries) });
+function unpackMonth(p) {
+  const data = { byDate: {}, byIssue: {}, issues: p?.issues || {} };
+  for (const e of p?.entries || []) {
+    (data.byDate[e.date] ||= { secs: 0, entries: [] }).secs += e.secs;
+    data.byDate[e.date].entries.push(e);
+    ((data.byIssue[e.issueId] ||= {})[e.date] ||= []).push(e);
+  }
+  return data;
+}
+const viewMemo = {};
+/** Month data for DISPLAY: fresh if loaded this session, else the saved copy, else empty. */
+function monthView(key) {
+  if (S.months[key]) return S.months[key];
+  const c = cache.get("m." + key);
+  if (!c) return { byDate: {}, byIssue: {}, issues: {} };
+  if (viewMemo[key]?.at !== c.at) viewMemo[key] = { at: c.at, data: unpackMonth(c.data) };
+  return viewMemo[key].data;
+}
+function saveMonthCache(key, data) {
+  cache.set("m." + key, packMonth(data));
+  const keys = Object.keys(localStorage).filter((k) => k.startsWith("jiratime.cache.m.")).sort();
+  while (keys.length > 8) localStorage.removeItem(keys.shift());          // keep 8 months
+}
+
+// Issue index: pinned, recently used, my open issues, issues I logged work on, earlier search results.
+const IDX = { items: {}, openAt: 0, timer: null };
+const PICK = new Map();                                                    // Jira picker results per query (5 min)
+function idxLoad() { const c = cache.get("issues"); IDX.items = c?.data?.items || {}; IDX.openAt = c?.data?.openAt || 0; }
+function idxSave() {
+  clearTimeout(IDX.timer);
+  IDX.timer = setTimeout(() => {
+    const keep = Object.values(IDX.items).sort((a, b) => (b.used || 0) - (a.used || 0) || (b.open ? 1 : 0) - (a.open ? 1 : 0) || (b.seen || 0) - (a.seen || 0)).slice(0, 800);
+    IDX.items = Object.fromEntries(keep.map((i) => [i.id, i]));
+    cache.set("issues", { items: IDX.items, openAt: IDX.openAt });
+  }, 300);
+}
+function idxAdd(list, src) {
+  const now = Date.now();
+  for (const i of list || []) {
+    if (!i || !i.id || !i.key) continue;
+    const id = String(i.id), cur = IDX.items[id] || {};
+    IDX.items[id] = { id, key: i.key, summary: i.summary || cur.summary || "", status: i.status || cur.status || "",
+      open: src === "open" || !!cur.open, used: src === "recent" ? now : cur.used || 0, seen: now };
+  }
+  idxSave();
+}
+function idxSearch(q, limit = 25) {
+  const toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean), q0 = toks.join(" "), now = Date.now();
+  const pins = new Set(S.pinned.map((p) => String(p.id)));
+  const all = new Map(Object.entries(IDX.items));
+  for (const p of S.pinned) { const id = String(p.id), cur = all.get(id) || {}; all.set(id, { ...cur, id, key: p.key, summary: p.summary || cur.summary || "" }); }
+  const out = [];
+  for (const i of all.values()) {
+    const hay = `${i.key} ${i.summary || ""}`.toLowerCase();
+    if (toks.length && !toks.every((t) => hay.includes(t))) continue;
+    const key = i.key.toLowerCase();
+    let sc = 0;
+    if (q0 && key === q0) sc += 1000; else if (q0 && key.startsWith(q0)) sc += 500;
+    if (pins.has(i.id)) sc += 300;
+    if (i.used) sc += 200 + Math.max(0, 100 - ((now - i.used) / 864e5) * 3);
+    if (i.open) sc += 80;
+    out.push({ sc: sc + (i.seen || 0) / 1e14, i });
+  }
+  return out.sort((a, b) => b.sc - a.sc).slice(0, limit).map(({ i }) => ({ id: i.id, key: i.key, summary: i.summary || "", status: i.status || "", pin: pins.has(i.id) }));
+}
+async function idxRefreshOpen(force) {
+  if (!S.me || (!force && Date.now() - IDX.openAt < 30 * 60e3)) return;
+  try {
+    const r = await jira(API.myOpen());
+    Object.values(IDX.items).forEach((i) => { i.open = false; });
+    idxAdd((r.issues || []).map((is) => ({ id: is.id, key: is.key, summary: is.fields?.summary, status: is.fields?.status?.name })), "open");
+    IDX.openAt = Date.now(); idxSave();
+  } catch { /* search keeps working through Jira */ }
+}
+const issueByKey = (key) => { const k = String(key).toUpperCase(); return Object.values(IDX.items).find((i) => i.key.toUpperCase() === k) || S.pinned.find((p) => p.key.toUpperCase() === k) || null; };
 
 // ================= worklog data =================
 async function loadMonth(y, m, force = false) {
   const key = monthKey(y, m);
   if (!force && S.months[key]) return S.months[key];
   const data = { byDate: {}, byIssue: {}, issues: {} };
-  if (!S.me) return (S.months[key] = data);
+  if (!S.me) return data;
   const last = new Date(y, m + 1, 0).getDate();
   const from = ymd(y, m, 1), to = ymd(y, m, last);
   const jql = `worklogAuthor = currentUser() AND worklogDate >= "${from}" AND worklogDate <= "${to}"`;
@@ -155,10 +273,10 @@ async function loadMonth(y, m, force = false) {
     const r = await jira(API.jql(jql, token));
     issues.push(...(r.issues || [])); token = r.nextPageToken || null;
   } while (token && issues.length < 500);
-  for (const is of issues) {
+  const lists = await pool(issues, 5, (is) => jira(API.issueWorklogs(is.id)));   // 5 at a time (was one by one)
+  issues.forEach((is, k) => {
     data.issues[is.id] = { id: is.id, key: is.key, summary: is.fields?.summary || "" };
-    const wl = await jira(API.issueWorklogs(is.id));
-    for (const w of wl.worklogs || []) {
+    for (const w of lists[k]?.worklogs || []) {
       if (w.author?.accountId !== S.me.accountId) continue;
       const date = String(w.started).slice(0, 10);
       if (date < from || date > to) continue;
@@ -167,29 +285,46 @@ async function loadMonth(y, m, force = false) {
       data.byDate[date].entries.push(entry);
       ((data.byIssue[is.id] ||= {})[date] ||= []).push(entry);
     }
-  }
-  return (S.months[key] = data);
+  });
+  S.months[key] = data; delete S.loadErr[key];
+  saveMonthCache(key, data);
+  idxAdd(Object.values(data.issues), "worklog");
+  JT.emit("data", { key });
+  return data;
 }
 async function ensureRange(fromStr, toStr) {
   const a = new Date(fromStr + "T00:00:00"), b = new Date(toStr + "T00:00:00");
   for (let t = new Date(a.getFullYear(), a.getMonth(), 1); t <= b; t.setMonth(t.getMonth() + 1)) await loadMonth(t.getFullYear(), t.getMonth());
 }
+/** Make sure the months of these dates are loaded fresh this session (needed before duplicate checks). */
+async function ensureDates(dates) { for (const mk of [...new Set(dates.map((d) => d.slice(0, 7)))]) { const [y, m] = mk.split("-").map(Number); await loadMonth(y, m - 1); } }
+/** Re-fetch these months (after a write). */
+async function reloadMonths(keys) { for (const mk of [...new Set(keys)]) { const [y, m] = mk.split("-").map(Number); await loadMonth(y, m - 1, true); } }
 const monthData = (date) => S.months[date.slice(0, 7)] || { byDate: {}, byIssue: {}, issues: {} };
 const existingFor = (issueId, date) => monthData(date).byIssue?.[issueId]?.[date] || [];
 const loggedSecs = (issueId, date) => existingFor(issueId, date).reduce((a, e) => a + e.secs, 0);
 
 async function refreshNow(silent) {
   if (!S.me) return;
+  const key = monthKey(S.y, S.m);
   try {
-    S.months = {};
     await loadMonth(S.y, S.m, true);
+    for (const k of Object.keys(S.months)) if (k !== key) delete S.months[k];      // other months reload when needed
     S.lastSync = Date.now();
     renderAll();
-    if (!silent) toast("Synced with Jira");
-  } catch (e) { if (!silent) toast("Sync failed: " + e.message); }
+    if (!silent) { toast("Synced with Jira"); PICK.clear(); idxRefreshOpen(true); }
+  } catch (e) { S.loadErr[key] = e.message; if (!silent) toast("Sync failed: " + e.message); }
   updateSyncInfo();
 }
-function updateSyncInfo() { $("#syncInfo").textContent = S.lastSync ? "synced " + new Date(S.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""; }
+function updateSyncInfo() {
+  const el = $("#syncInfo"), key = monthKey(S.y, S.m), err = S.loadErr[key];
+  if (err && S.me) {
+    el.innerHTML = `<span class="st-failed">⚠ ${S.months[key] ? "Refresh failed" : "Could not load worklogs"}: ${esc(err)}</span> <button id="syncRetry" class="small">Retry</button>`;
+    $("#syncRetry").onclick = () => refreshNow(false);
+    return;
+  }
+  el.textContent = !S.months[key] && S.me ? "showing saved data · updating…" : S.lastSync ? "synced " + new Date(S.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+}
 
 // ================= days / holidays =================
 const holidayOf = (d) => S.holidays[d];
@@ -209,7 +344,8 @@ function dayStatus(date, data) {
 
 // ================= calendar =================
 function renderCalendar() {
-  const data = S.months[monthKey(S.y, S.m)] || { byDate: {}, byIssue: {} };
+  const key = monthKey(S.y, S.m), data = monthView(key);
+  updateSyncInfo();
   $("#monthSel").value = S.m; $("#yearSel").value = S.y;
   const first = (new Date(S.y, S.m, 1).getDay() + 6) % 7, last = new Date(S.y, S.m + 1, 0).getDate();
   let html = DOW.map((d) => `<div class="dow">${d}</div>`).join("") + '<div class="day empty"></div>'.repeat(first);
@@ -218,7 +354,7 @@ function renderCalendar() {
     const failed = [...S.failed].some((k) => k.endsWith("|" + s));
     const secs = data.byDate[s]?.secs || 0;
     const cls = ["day", off && "off", S.selected.has(s) && "selected", !S.selected.has(s) && st, failed && "failed", s === todayStr() && "today"].filter(Boolean).join(" ");
-    html += `<div class="${cls}" data-d="${s}" ${hol ? `title="${esc(hol.label)}"` : ""}><span class="n">${d}</span><span class="h">${hol ? "🏖 " + esc(hol.label).slice(0, 8) : secs ? fmtH(secs) : ""}</span></div>`;
+    html += `<div class="${cls}" data-d="${s}" ${hol ? `title="${esc(hol.label)}"` : ""}><span class="n">${d}</span><button class="dinfo" data-info="${s}" title="Day details" tabindex="-1">⋯</button><span class="h">${hol ? "🏖 " + esc(hol.label).slice(0, 8) : secs ? fmtH(secs) : ""}</span></div>`;
   }
   $("#calendar").innerHTML = html;
   renderStats(data); renderBanner(data); renderSelection();
@@ -237,7 +373,7 @@ function renderStats(data) {
 }
 
 function missingDays() {
-  const data = S.months[monthKey(S.y, S.m)] || { byDate: {} };
+  const data = monthView(monthKey(S.y, S.m));
   return workingDays(S.y, S.m).filter((d) => d <= todayStr() && !data.byDate[d]);
 }
 function renderBanner(data) {
@@ -259,7 +395,7 @@ function renderSelection() {
   const perDay = valid.reduce((a, r) => a + parseDuration(r.duration), 0);
   $("#summary").innerHTML = `<b>${dates.length}</b> dates × <b>${valid.length}</b> issue(s) = <b>${dates.length * valid.length}</b> entries · <b>${fmtH(perDay * dates.length)}</b> total`;
   $("#previewBtn").disabled = !dates.length || !valid.length || !S.me;
-  $("#fillMonth").disabled = !valid.length && !S.plans.length || !S.me;
+  $("#fillMonth").disabled = (!valid.length && !window.JTT?.hasPlans?.()) || !S.me;
 }
 
 function toggleDate(d, shift) {
@@ -270,41 +406,78 @@ function toggleDate(d, shift) {
   } else S.selected.has(d) ? S.selected.delete(d) : S.selected.add(d);
   S.lastClicked = d; renderCalendar();
 }
+// Drag across days to select a range; starting on a selected day unselects the range instead.
+const DRAG = { on: false, start: null, cur: null, moved: false, shift: false, mode: "add" };
+function rangeDates(a, b) {
+  const [x, y] = [a, b].sort(), out = [];
+  for (let t = new Date(x + "T00:00:00"); ymdOf(t) <= y; t.setDate(t.getDate() + 1)) { const s = ymdOf(t); if (!isOffDay(s)) out.push(s); }
+  return out;
+}
+function paintDrag() {
+  const set = new Set(rangeDates(DRAG.start, DRAG.cur)), cls = DRAG.mode === "add" ? "dragsel" : "dragdel";
+  document.querySelectorAll("#calendar .day[data-d]").forEach((c) => c.classList.toggle(cls, set.has(c.dataset.d)));
+}
 
 async function gotoMonth(y, m) {
   const dt = new Date(y, m, 1); S.y = dt.getFullYear(); S.m = dt.getMonth();
   renderCalendar();
-  try { await loadMonth(S.y, S.m); S.lastSync = Date.now(); updateSyncInfo(); } catch (e) { toast("Could not load worklogs: " + e.message); if (e.status === 401) checkConnection(); }
+  try { await loadMonth(S.y, S.m); S.lastSync = Date.now(); updateSyncInfo(); }
+  catch (e) { S.loadErr[monthKey(S.y, S.m)] = e.message; toast("Could not load worklogs: " + e.message); if (e.status === 401) checkConnection(); }
   renderCalendar(); loadSuggestion();
 }
 function renderAll() {
   renderCalendar(); renderSuggestion();
   const v = document.querySelector(".nav.active")?.dataset.view;
   if (v === "weekly") renderWeekly(); if (v === "reports") renderReports(); if (v === "history") renderHistory();
+  JT.emit("view", v);
 }
 
 // ================= issue search (shared) =================
 function attachIssueSearch(input, resDiv, onPick) {
-  let timer;
-  const search = async () => {
-    try {
-      const q = input.value.trim();
-      const r = await jira(API.picker(q));
-      let issues = (r.sections || []).flatMap((s) => s.issues || []).slice(0, 25).map((i) => ({ id: String(i.id), key: i.key, summary: i.summaryText || i.summary }));
-      const pins = !q ? S.pinned : S.pinned.filter((p) => (p.key + p.summary).toLowerCase().includes(q.toLowerCase()));
-      issues = [...pins.map((p) => ({ ...p, pin: true })), ...issues.filter((i) => !pins.some((p) => p.id === i.id))];
-      resDiv.innerHTML = issues.map((i) => `<div data-id="${i.id}" data-key="${esc(i.key)}" data-sum="${esc(i.summary)}">${i.pin ? "★ " : ""}${esc(i.key)} <small>${esc(i.summary)}</small></div>`).join("") || '<div class="muted">No issues</div>';
-      resDiv.classList.remove("hidden");
-    } catch (e) { resDiv.innerHTML = `<div class="muted">${esc(e.message)}</div>`; resDiv.classList.remove("hidden"); }
+  let timer, seq = 0, list = [], act = -1;
+  const rowHtml = (i) => `<div data-id="${esc(i.id)}" data-key="${esc(i.key)}" data-sum="${esc(i.summary)}">${i.pin ? "★ " : ""}${esc(i.key)}${i.status ? ` <span class="ist">${esc(i.status)}</span>` : ""} <small>${esc(i.summary)}</small></div>`;
+  const show = (items, note) => {
+    list = items; act = -1;
+    resDiv.innerHTML = (items.map(rowHtml).join("") + (note ? `<div class="muted tiny rnote">${esc(note)}</div>` : "")) || '<div class="muted rnote">No issues</div>';
+    resDiv.classList.remove("hidden");
   };
-  input.addEventListener("focus", () => { input.select(); search(); });
-  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 250); });
-  input.addEventListener("keydown", (e) => { if (e.key === "Escape") { resDiv.classList.add("hidden"); input.blur(); } });
+  const merge = (...lists) => { const seen = new Set(); return lists.flat().filter((i) => i && !seen.has(i.id) && seen.add(i.id)).slice(0, 25); };
+  const remote = async (q, my) => {
+    let hit = PICK.get(q);                                  // one Jira call per query: shared while in flight, reused for 5 min
+    if (!hit || Date.now() - hit.at > 5 * 60e3) {
+      hit = { at: Date.now(), p: jira(API.picker(q)).then((r) => (r.sections || []).flatMap((x) => x.issues || []).map((i) => ({ id: String(i.id), key: i.key, summary: i.summaryText || i.summary || "" }))) };
+      PICK.set(q, hit);
+      hit.p.then((list) => idxAdd(list, "search"), () => PICK.delete(q));
+    }
+    let found;
+    try { found = await hit.p; } catch (e) { if (my === seq) show(idxSearch(q), e.message); return; }
+    if (my !== seq || resDiv.classList.contains("hidden")) return;
+    const local = idxSearch(q);
+    show(merge(local.filter((i) => i.pin), local.slice(0, 6), found.map((i) => ({ ...i, status: IDX.items[i.id]?.status || "", pin: isPinned(i.id) })), local));
+  };
+  const run = (delay) => {
+    const q = input.value.trim(), my = ++seq;
+    show(idxSearch(q), "⟳ searching Jira…");                // instant: from this browser's issue index
+    clearTimeout(timer); timer = setTimeout(() => remote(q, my), delay);
+  };
+  const pick = (i) => { resDiv.classList.add("hidden"); input.blur(); idxAdd([i], "recent"); onPick({ id: i.id, key: i.key, summary: i.summary }); };
+  input.addEventListener("focus", () => { input.select(); run(0); });
+  input.addEventListener("input", () => run(250));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { resDiv.classList.add("hidden"); input.blur(); return; }
+    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && list.length) {
+      e.preventDefault();
+      act = (act + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length;
+      const rows = resDiv.querySelectorAll("[data-id]");
+      rows.forEach((d, k) => d.classList.toggle("act", k === act)); rows[act]?.scrollIntoView({ block: "nearest" });
+    }
+    if (e.key === "Enter" && list.length) { e.preventDefault(); pick(list[Math.max(0, act)]); }
+  });
   input.addEventListener("blur", () => setTimeout(() => resDiv.classList.add("hidden"), 200));
   resDiv.addEventListener("mousedown", (e) => {
     const d = e.target.closest("[data-id]"); if (!d) return;
-    resDiv.classList.add("hidden"); input.blur();
-    onPick({ id: d.dataset.id, key: d.dataset.key, summary: d.dataset.sum });
+    e.preventDefault();
+    pick({ id: d.dataset.id, key: d.dataset.key, summary: d.dataset.sum });
   });
 }
 
@@ -363,14 +536,6 @@ function setRowIssue(issue) {
   row.issue = issue; renderRows(); renderSelection(); renderSuggestion();
 }
 
-// ================= templates / plans =================
-function renderTemplates() {
-  $("#tplSel").innerHTML = '<option value="">Templates…</option>' + S.templates.map((t, i) => `<option value="${i}">${esc(t.name)}</option>`).join("");
-  $("#planSel").innerHTML = '<option value="">Monthly plans…</option>' + S.plans.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join("");
-  $("#planList").innerHTML = S.plans.map((p, i) => `<div class="li"><span>${esc(p.name)} <small class="muted">${p.rows.map((r) => esc(r.issue.key) + " " + esc(r.duration)).join(", ")}</small></span><button class="small danger" data-delplan="${i}">Delete</button></div>`).join("") || '<p class="muted tiny">No plans yet. Configure rows on the calendar page and click "Save as plan".</p>';
-}
-const loadPlanRows = (plan) => { S.rows = plan.rows.map((r) => newRow({ issue: r.issue, duration: r.duration, comment: r.comment })); renderRows(); renderSelection(); };
-
 // ================= jobs / preview =================
 function makeJob(issue, date, duration, comment, include) {
   const existing = existingFor(issue.id, date);
@@ -418,15 +583,16 @@ async function openPreview(customJobs) {
     const dupCount = jobs.filter((j) => j.existing.length).length;
     const bad = inc.some((j) => !parseDuration(j.duration));
     const warns = warningsFor(jobs);
+    assignStarts(jobs, start);
     openModal(`
       <h3>Review before submitting</h3>
-      <p class="muted">Start time ${esc(start)} · Weekends excluded: ${S.settings.weekend ? "NO" : "YES"} · Dates with existing worklogs: <b>${dupCount}</b></p>
+      <p class="muted">Start ${esc(start)} (same-day entries follow each other) · Weekends excluded: ${S.settings.weekend ? "NO" : "YES"} · Dates with existing worklogs: <b>${dupCount}</b></p>
       ${warns.length ? `<div class="warnbox"><b>⚠ Check these:</b><ul>${warns.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>` : ""}
-      <div class="scroll" style="max-height:44vh"><table><tr><th></th><th>Date</th><th>Issue</th><th>Duration</th><th>Comment</th><th>Existing</th></tr>
+      <div class="scroll" style="max-height:44vh"><table><tr><th></th><th>Date</th><th>Issue</th><th>Duration</th><th>Start</th><th>Comment</th><th>Existing</th></tr>
       ${jobs.map((j, i) => `<tr>
         <td><input type="checkbox" data-i="${i}" class="inc" ${j.include ? "checked" : ""}></td>
         <td>${prettyDate(j.date)}</td><td>${esc(j.issue.key)}</td>
-        <td><input class="jd" data-i="${i}" value="${esc(j.duration)}"></td>
+        <td><input class="jd" data-i="${i}" value="${esc(j.duration)}"></td><td class="muted">${j.include ? esc(j.startAt || "") : ""}</td>
         <td>${esc(j.comment) || '<span class="muted">—</span>'}</td>
         <td>${j.existing.length ? `<span class="st-failed">${fmtH(j.existing.reduce((a, e) => a + e.secs, 0))}</span> ${j.existing.map((e) => esc(e.comment || "no comment")).join("; ")} <small class="muted">(${esc(j.existing[0].author)})</small>` : "—"}</td></tr>`).join("")}
       </table></div>
@@ -448,6 +614,19 @@ function startedStamp(date, time) {
   const dt = new Date(+date.slice(0, 4), +date.slice(5, 7) - 1, +date.slice(8, 10), h, mi);
   const off = -dt.getTimezoneOffset(), sign = off >= 0 ? "+" : "-", a = Math.abs(off);
   return `${date}T${pad(h)}:${pad(mi)}:00.000${sign}${pad(Math.floor(a / 60))}${pad(a % 60)}`;
+}
+
+/** Same-day entries follow each other (10:00, 10:30, 11:30 …), after the time already logged that day. */
+function assignStarts(jobs, base) {
+  const [bh, bm] = String(base || "10:00").split(":").map(Number), baseMin = (bh || 0) * 60 + (bm || 0), used = {};
+  for (const j of jobs) {
+    if (!j.include) { j.startAt = ""; continue; }
+    if (!(j.date in used)) used[j.date] = Math.round((monthData(j.date).byDate[j.date]?.secs || 0) / 60);
+    const mins = Math.min(baseMin + used[j.date], 23 * 60 + 30);
+    j.startAt = `${pad(Math.floor(mins / 60))}:${pad(mins % 60)}`;
+    used[j.date] += Math.round(parseDuration(j.duration) / 60);
+  }
+  return jobs;
 }
 
 /** Used after an uncertain failure / before a retry, so we never create duplicates. */
@@ -490,7 +669,7 @@ async function runSubmission(jobs, start, dry) {
       if (j.attempted && await worklogAlreadyExists(j)) { j.status = "success"; j.error = "already existed (verified)"; }
       else {
         j.attempted = true;
-        const body = { timeSpentSeconds: parseDuration(j.duration), started: startedStamp(j.date, start) };
+        const body = { timeSpentSeconds: parseDuration(j.duration), started: startedStamp(j.date, j.startAt || start) };
         if (j.comment) body.comment = j.comment;
         const res = await jira(API.addWorklog(j.issue.id), { method: "POST", body: JSON.stringify(body) });
         j.worklogId = res?.id; j.status = "success";
@@ -517,7 +696,12 @@ async function runSubmission(jobs, start, dry) {
     S.comments = S.comments.slice(0, 20); await store.set("comments", S.comments);
   }
   draw(true);
-  if (!dry) { S.months = {}; S.weekInputs = {}; await gotoMonth(S.y, S.m); if (abort) checkConnection(); }
+  if (!dry) {
+    S.weekInputs = {};
+    await reloadMonths([...jobs.map((j) => j.date.slice(0, 7)), monthKey(S.y, S.m)]).catch(() => {});
+    S.lastSync = Date.now(); updateSyncInfo(); renderAll();
+    if (abort) checkConnection();
+  }
 }
 
 async function logHistory(j) {
@@ -528,19 +712,25 @@ async function logHistory(j) {
 
 // ================= fill my month / balance / suggestions =================
 async function fillMonth() {
-  let valid = S.rows.filter((r) => r.issue && parseDuration(r.duration));
-  if (!valid.length) {
-    const sel = $("#planSel").value, plan = S.plans[sel] || S.plans[0];
-    if (!plan) { toast("Configure issues first, or save a monthly plan"); return; }
-    loadPlanRows(plan); valid = S.rows;
-  }
-  await loadMonth(S.y, S.m);
+  if (!S.me) return;
+  let data;
+  try { data = await loadMonth(S.y, S.m); } catch (e) { toast("Could not load worklogs: " + e.message); return; }
   const isCurrent = monthKey(S.y, S.m) === todayStr().slice(0, 7);
-  const data = S.months[monthKey(S.y, S.m)];
   const days = workingDays(S.y, S.m).filter((d) => !data.byDate[d] && (!isCurrent || d <= todayStr()));
   if (!days.length) { toast("Nothing to fill — no missing working days"); return; }
+  if (S.rows.some((r) => r.issue && parseDuration(r.duration))) { S.selected = new Set(days); renderCalendar(); return openPreview(); }
+  if (!window.JTT?.hasPlans()) { toast("Pick issues in the rows, or create a day plan on the Templates page"); return; }
+  // no rows configured: each day uses the day plan set for its weekday (Templates page), else the first plan
+  const jobs = [], missing = new Set();
+  for (const d of days) {
+    const p = JTT.planFor(d) || JTT.defaultPlan();
+    const r = await JTT.planJobs(p, d);
+    jobs.push(...r.jobs); r.missing.forEach((m) => missing.add(m));
+  }
+  if (missing.size) toast(`Pick a Jira issue for: ${[...missing].join(", ")} (Templates page)`);
+  if (!jobs.length) return;
   S.selected = new Set(days); renderCalendar();
-  openPreview();
+  openPreview(jobs);
 }
 
 function balanceDialog() {
@@ -727,7 +917,8 @@ async function undoEntries(list, label) {
   }
   await store.set("history", S.history);
   toast(`Removed ${ok} worklog(s)${fail ? `, ${fail} failed` : ""}`);
-  S.months = {}; await gotoMonth(S.y, S.m); renderHistory();
+  await reloadMonths([...list.map((h) => h.date.slice(0, 7)), monthKey(S.y, S.m)]).catch(() => {});
+  renderAll(); renderHistory();
 }
 
 // ================= settings / holidays =================
@@ -744,44 +935,67 @@ async function saveHolidays() { await store.set("holidays", S.holidays); renderH
 
 // ================= boot =================
 async function boot() {
+  idxLoad();
   const ok = await checkConnection();
   if (ok) await gotoMonth(S.y, S.m); else renderCalendar();
   renderSelection();
+  JT.ready = true; JT.emit("ready", { connected: ok });
+  if (ok) idxRefreshOpen(false);
 }
 
 async function init() {
   S.settings = { ...DEFAULTS, ...(await store.get("settings", {})) };
-  S.templates = await store.get("templates", [
-    { name: "DSM & meeting — 2h", duration: "2h", comment: "DSM and meeting Team Support" },
-    { name: "Development — 4h", duration: "4h", comment: "Development and implementation activities" },
-    { name: "Dev, debug & test — 8h", duration: "8h", comment: "Development, debugging and testing activities" },
-  ]);
-  S.plans = await store.get("plans", []); S.holidays = await store.get("holidays", {}); S.pinned = await store.get("pinned", []);
+  S.holidays = await store.get("holidays", {}); S.pinned = await store.get("pinned", []);
   S.comments = await store.get("comments", []);
   S.history = (await store.get("history", [])).map((h) => ({ id: uid(), ...h }));
   S.rows = [newRow()];
   document.documentElement.dataset.theme = await store.get("theme", "dark");
 
   $("#monthSel").innerHTML = MONTHS.map((n, i) => `<option value="${i}">${n}</option>`).join("");
-  fillSettings(); renderTemplates(); renderRows(); renderPinned(); renderHolidays();
+  fillSettings(); renderRows(); renderPinned(); renderHolidays();
 
   document.querySelectorAll(".nav").forEach((b) => b.addEventListener("click", () => {
     document.querySelectorAll(".nav").forEach((x) => x.classList.toggle("active", x === b));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + b.dataset.view));
+    document.body.classList.remove("navopen");
     renderAll();
   }));
+  $("#menuBtn").onclick = () => document.body.classList.toggle("navopen");
+  $("#navShade").onclick = () => document.body.classList.remove("navopen");
   $("#themeBtn").onclick = async () => { const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = t; await store.set("theme", t); };
   $("#syncBtn").onclick = () => refreshNow(false);
 
   // calendar
-  $("#calendar").addEventListener("click", (e) => { const d = e.target.closest(".day[data-d]"); if (d) toggleDate(d.dataset.d, e.shiftKey); });
+  // click = toggle, drag = range, ⋯ = day details
+  const cal = $("#calendar");
+  cal.addEventListener("click", (e) => { const b = e.target.closest(".dinfo"); if (b) window.openDay?.(b.dataset.info); });
+  cal.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || e.target.closest(".dinfo")) return;
+    const d = e.target.closest(".day[data-d]"); if (!d) return;
+    if (e.pointerType === "mouse") e.preventDefault();
+    Object.assign(DRAG, { on: true, start: d.dataset.d, cur: d.dataset.d, moved: false, shift: e.shiftKey, mode: S.selected.has(d.dataset.d) ? "del" : "add" });
+  });
+  document.addEventListener("pointermove", (e) => {
+    if (!DRAG.on) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY)?.closest?.("#calendar .day[data-d]");
+    if (!el || el.dataset.d === DRAG.cur) return;
+    DRAG.cur = el.dataset.d; DRAG.moved = true; paintDrag();
+  });
+  document.addEventListener("pointerup", () => {
+    if (!DRAG.on) return;
+    DRAG.on = false;
+    if (!DRAG.moved) { toggleDate(DRAG.start, DRAG.shift); return; }
+    for (const d of rangeDates(DRAG.start, DRAG.cur)) { if (DRAG.mode === "add") S.selected.add(d); else S.selected.delete(d); }
+    S.lastClicked = DRAG.cur; renderCalendar();
+  });
+  document.addEventListener("pointercancel", () => { if (DRAG.on) { DRAG.on = false; renderCalendar(); } });
   $("#prevM").onclick = () => gotoMonth(S.y, S.m - 1);
   $("#nextM").onclick = () => gotoMonth(S.y, S.m + 1);
   $("#todayM").onclick = () => gotoMonth(new Date().getFullYear(), new Date().getMonth());
   $("#monthSel").onchange = (e) => gotoMonth(S.y, +e.target.value);
   $("#yearSel").onchange = (e) => gotoMonth(+e.target.value, S.m);
   $("#selWeekdays").onclick = () => { workingDays(S.y, S.m).forEach((d) => S.selected.add(d)); renderCalendar(); };
-  $("#selMissing").onclick = () => { const data = S.months[monthKey(S.y, S.m)] || { byDate: {} }; workingDays(S.y, S.m).filter((d) => !data.byDate[d]).forEach((d) => S.selected.add(d)); renderCalendar(); };
+  $("#selMissing").onclick = () => { const data = monthView(monthKey(S.y, S.m)); workingDays(S.y, S.m).filter((d) => !data.byDate[d]).forEach((d) => S.selected.add(d)); renderCalendar(); };
   $("#clearSel").onclick = () => { S.selected.clear(); renderCalendar(); };
   $("#balance").onclick = balanceDialog;
 
@@ -794,25 +1008,6 @@ async function init() {
   $("#dupMode").onchange = (e) => { S.settings.dup = e.target.value; store.set("settings", S.settings); };
   $("#pinned").addEventListener("click", (e) => { const c = e.target.closest(".pin"); if (c) { const p = S.pinned.find((x) => x.id === c.dataset.id); if (e.shiftKey) togglePin(p); else setRowIssue(p); } });
   $("#pinned").title = "Click to use · Shift+click to unpin";
-  $("#tplSel").onchange = (e) => {
-    const t = S.templates[e.target.value]; if (!t) return;
-    const row = S.rows.find((r) => !r.comment) || S.rows[S.rows.length - 1];
-    row.duration = t.duration; row.comment = t.comment; renderRows(); renderSelection(); e.target.value = "";
-  };
-  $("#tplSave").onclick = async () => {
-    const r = S.rows[0]; const name = prompt("Template name?", `${r.comment || "Template"} — ${r.duration}`);
-    if (!name) return; S.templates.push({ name, duration: r.duration, comment: r.comment }); await store.set("templates", S.templates); renderTemplates(); toast("Template saved");
-  };
-  $("#planSel").onchange = (e) => { const p = S.plans[e.target.value]; if (p) loadPlanRows(p); };
-  $("#planSave").onclick = async () => {
-    const valid = S.rows.filter((r) => r.issue && parseDuration(r.duration));
-    if (!valid.length) { toast("Pick at least one issue first"); return; }
-    const name = prompt("Plan name?", valid.map((r) => r.issue.key + " " + r.duration).join(" + ")); if (!name) return;
-    S.plans.push({ name, rows: valid.map((r) => ({ issue: r.issue, duration: r.duration, comment: r.comment })) });
-    await store.set("plans", S.plans); renderTemplates(); renderSelection(); toast("Monthly plan saved");
-  };
-  $("#planList").addEventListener("click", async (e) => { const b = e.target.closest("[data-delplan]"); if (!b) return; S.plans.splice(+b.dataset.delplan, 1); await store.set("plans", S.plans); renderTemplates(); renderSelection(); });
-
   // weekly
   attachIssueSearch($("#wAdd"), $("#wAddRes"), (i) => { if (!S.weekIssues.some((x) => x.id === i.id)) S.weekIssues.push(i); $("#wAdd").value = ""; renderWeekly(); });
   $("#wPrev").onclick = () => { S.week = addDays(S.week, -7); renderWeekly(); };
@@ -848,7 +1043,10 @@ async function init() {
     await store.set("settings", S.settings); toast("Settings saved"); fillSettings(); renderAll();
   };
   $("#setReconnect").onclick = () => setupDialog();
-  $("#setLogout").onclick = () => { creds.clear(); S.me = null; S.months = {}; toast("Credentials removed from this browser"); boot(); };
+  $("#setLogout").onclick = () => {
+    creds.clear(); cache.clearAll(); IDX.items = {}; IDX.openAt = 0; PICK.clear();
+    S.me = null; S.months = {}; toast("Credentials and saved Jira data removed from this browser"); boot();
+  };
   $("#hAdd").onclick = () => { const d = $("#hDate").value; if (!d) return; S.holidays[d] = { label: $("#hLabel").value || $("#hType").value, type: $("#hType").value }; saveHolidays(); };
   $("#hAddRange").onclick = () => {
     const a = $("#hFrom").value, b = $("#hTo").value; if (!a || !b || a > b) { toast("Pick a valid from/to range"); return; }
@@ -857,7 +1055,7 @@ async function init() {
   };
   $("#holList").addEventListener("click", (e) => { const b = e.target.closest("[data-delhol]"); if (b) { delete S.holidays[b.dataset.delhol]; saveHolidays(); } });
 
-  $("#modal").addEventListener("mousedown", (e) => { if (e.target.id === "modal" && !/running…/.test($("#modalBox").textContent)) closeModal(); });
+  $("#modal").addEventListener("mousedown", (e) => { if (e.target.id === "modal" && !/running…/.test($("#modalBox").textContent) && !$("#modalBox [data-sticky]")) closeModal(); });
 
   // auto refresh: every 5 min and when the tab becomes visible again
   setInterval(() => { if (!document.hidden && !modalOpen()) refreshNow(true); }, 5 * 60 * 1000);
