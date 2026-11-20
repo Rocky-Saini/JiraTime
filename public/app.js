@@ -366,22 +366,42 @@ function renderCalendar() {
     const failed = [...S.failed].some((k) => k.endsWith("|" + s));
     const secs = data.byDate[s]?.secs || 0;
     const cls = ["day", off && "off", S.selected.has(s) && "selected", !S.selected.has(s) && st, failed && "failed", s === todayStr() && "today"].filter(Boolean).join(" ");
-    html += `<div class="${cls}" data-d="${s}" ${hol ? `title="${esc(hol.label)}"` : ""}><span class="n">${d}</span><button class="dinfo" data-info="${s}" title="Day details" tabindex="-1">⋯</button><span class="h">${hol ? "🏖 " + esc(hol.label).slice(0, 8) : secs ? fmtH(secs) : ""}</span></div>`;
+    html += `<div class="${cls}" data-d="${s}" ${hol ? `title="${esc(hol.label)}"` : ""}><span class="n">${d}</span><button class="dinfo" data-info="${s}" title="Day details" tabindex="-1">⋯</button><span class="h">${hol ? "🏖 " + esc(hol.label.slice(0, 8)) : ""}${secs ? (hol ? " · " : "") + fmtH(secs) : ""}</span></div>`;
   }
   $("#calendar").innerHTML = html; hideDayTip();
   renderStats(data); renderBanner(data); renderSelection();
 }
 
+/** Month numbers for the dashboard. Every number is computed from working days only, except "Total logged". */
+function monthStats(data, y = S.y, m = S.m) {
+  const wd = workingDays(y, m), target = S.settings.target * 3600, today = todayStr();
+  let done = 0, partial = 0, missing = 0, upcoming = 0, onWorking = 0, remaining = 0, total = 0, offDays = 0;
+  for (const d of wd) {
+    const secs = data.byDate[d]?.secs || 0;
+    if (secs >= target) done++; else if (secs > 0) partial++; else if (d < today) missing++; else upcoming++;
+    onWorking += Math.min(secs, target);
+    remaining += Math.max(0, target - secs);
+  }
+  const wdSet = new Set(wd);
+  for (const [d, v] of Object.entries(data.byDate)) { total += v.secs; if (!wdSet.has(d)) offDays += v.secs; }
+  return { wd: wd.length, target, done, partial, pending: missing + upcoming, missing, upcoming, total, offDays, extra: total - offDays - onWorking, remaining, expected: wd.length * target, onWorking };
+}
+
 function renderStats(data) {
-  const wd = workingDays(S.y, S.m);
-  let done = 0, partial = 0, total = 0;
-  for (const d of wd) { const st = dayStatus(d, data); if (st === "done") done++; if (st === "partial") partial++; }
-  for (const d of Object.values(data.byDate)) total += d.secs;
+  const st = monthStats(data), h = S.settings.target;
   const failedCount = [...S.failed].filter((k) => k.split("|")[1].startsWith(monthKey(S.y, S.m))).length;
-  const remaining = Math.max(0, wd.length * S.settings.target * 3600 - total);
-  $("#stats").innerHTML = [["Working days", wd.length], ["Completed", done], ["Partial", partial], ["Pending", wd.length - done - partial], ["Failed (session)", failedCount], ["Total logged", fmtH(total)], ["Remaining", fmtH(remaining)]]
-    .map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
-  $("#progressBar").style.width = (wd.length ? Math.round(((done + partial * 0.5) / wd.length) * 100) : 0) + "%";
+  const card = (v, label, sub, tip) => `<div class="stat" title="${esc(tip)}"><b>${v}</b><span>${label}</span>${sub ? `<small>${sub}</small>` : ""}</div>`;
+  $("#stats").innerHTML = [
+    card(st.wd, "Working days", "", "Mon–Fri in this month minus holidays and leave"),
+    card(st.done, "Completed", "", `Working days with ${h}h or more`),
+    card(st.partial, "Partial", "", `Working days with some time but less than ${h}h`),
+    card(st.pending, "Pending", st.pending ? `${st.missing} missed · ${st.upcoming} upcoming` : "", "Working days with no worklog yet (missed = before today)"),
+    card(failedCount, "Failed (session)", "", "Worklogs that failed to submit in this session"),
+    card(fmtH(st.total), "Total logged", st.offDays ? `incl. ${fmtH(st.offDays)} on holidays / weekends` : "", "Everything you logged this month, on any day"),
+    card(fmtH(st.remaining), "Remaining", `of ${fmtH(st.expected)} (${st.wd} × ${h}h)`, `Sum over working days of (${h}h − logged that day). Time on holidays/weekends and hours above ${h}h on a day do not reduce it.`),
+  ].join("") + `<button class="stat aicard" id="aiCard" title="Open the AI efficiency report"><b class="eff noest">…</b><span>AI efficiency</span><small></small></button>`;
+  window.AIEFF?.renderCard?.();
+  $("#progressBar").style.width = (st.expected ? Math.round((st.onWorking / st.expected) * 100) : 0) + "%";
 }
 
 function missingDays() {
@@ -393,7 +413,8 @@ function renderBanner(data) {
   const missing = S.me && monthKey(S.y, S.m) <= todayStr().slice(0, 7) ? missingDays() : [];
   if (!missing.length) { b.classList.add("hidden"); return; }
   b.classList.remove("hidden");
-  b.innerHTML = `⚠ <b>${missing.length}</b> working day${missing.length > 1 ? "s" : ""} in ${MONTHS[S.m]} ha${missing.length > 1 ? "ve" : "s"} no worklog. <button id="bnSel" class="small">Select missing days</button> <button id="bnFill" class="small">⚡ Fill my month</button>`;
+  const past = missing.filter((d) => d < todayStr()).length, todayToo = missing.includes(todayStr());     // same count as "Pending · missed"
+  b.innerHTML = `⚠ ${past ? `<b>${past}</b> past working day${past > 1 ? "s" : ""} in ${MONTHS[S.m]} ha${past > 1 ? "ve" : "s"} no worklog${todayToo ? ", and today is not logged yet" : ""}.` : "Today is not logged yet."} <button id="bnSel" class="small">Select missing days</button> <button id="bnFill" class="small">⚡ Fill my month</button>`;
   $("#bnSel").onclick = () => { missing.forEach((d) => S.selected.add(d)); renderCalendar(); };
   $("#bnFill").onclick = fillMonth;
 }
