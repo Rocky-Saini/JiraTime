@@ -136,13 +136,17 @@ function renderToday() {
 }
 
 // ================= quick log =================
-const QL_DUR = /(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)\b(?:\s*(\d+)\s*(?:m|min|mins|minutes)\b)?|(\d+)\s*(?:m|min|mins|minutes)\b/i;
+const QL_DUR = /(\d+(?:\.\d+)?)\s*(?:hours|hour|hrs|hr|h)(?![a-z])(?:\s*(\d+)\s*(?:minutes|mins|min|m)(?![a-z]))?|(\d+)\s*(?:minutes|mins|min|m)(?![a-z])/i;
+const QL_KEY = /\b[A-Z][A-Z0-9_]*-\d+\b/i;
 const QL_WD = { mon: 1, monday: 1, tue: 2, tues: 2, tuesday: 2, wed: 3, wednesday: 3, thu: 4, thur: 4, thurs: 4, thursday: 4, fri: 5, friday: 5, sat: 6, saturday: 6, sun: 7, sunday: 7 };
 const QL_MON = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
-/** "2h DSM, 6h AWS Connect: contact flow fixes yesterday" -> { dates, items } */
-function qlParse(text, now = new Date()) {
-  let t = ` ${String(text || "").replace(/\s+/g, " ")} `;
+/** "2h DSM, 6h AWS Connect: contact flow fixes yesterday" or "FUL2-1=2, FUL2-2=6" -> { dates, items }
+    Without a date word, the days selected on the calendar are used (else today). */
+function qlParse(text, now = new Date(), defaultDates = []) {
+  let t = ` ${String(text || "").replace(/[\r\n\t]+/g, ",").replace(/\s+/g, " ")} `;
+  // "KEY=2" / "KEY = 1.5h" / "KEY=2|KEY=4": start a new entry at every KEY= and drop the "="
+  t = t.replace(/\b([A-Z][A-Z0-9_]*-\d+)\s*=\s*/gi, " , $1 ");
   const dates = new Set(), today = ymdOf(now), notes = [];
   const take = (re, fn) => { t = t.replace(re, (...m) => { fn(m); return " "; }); };
   const addDate = (d) => { if (/^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(new Date(d + "T00:00:00"))) dates.add(d); else notes.push("bad date"); };
@@ -161,15 +165,23 @@ function qlParse(text, now = new Date()) {
     let back = (cur - want + 7) % 7; if (m[1] && back === 0) back = 7;
     dates.add(ymdOf(addDays(now, -back)));
   });
-  if (!dates.size) dates.add(today);
+  let fromSelection = false;
+  if (!dates.size) { if (defaultDates.length) { defaultDates.forEach((d) => dates.add(d)); fromSelection = true; } else dates.add(today); }
 
   const items = [];
-  for (const raw of t.split(/,|;|\+|\n|\band\b/i).map((x) => x.trim()).filter(Boolean)) {
+  for (const raw of t.split(/,|;|\||\+|\n|\band\b/i).map((x) => x.trim()).filter(Boolean)) {
     let part = raw, comment = "";
     const ci = part.indexOf(":"); if (ci >= 0) { comment = part.slice(ci + 1).trim(); part = part.slice(0, ci).trim(); }
     let secs = 0;
     const dm = part.match(QL_DUR);
     if (dm) { secs = dm[3] ? +dm[3] * 60 : Math.round(parseFloat(dm[1]) * 3600 + (+dm[2] || 0) * 60); part = (part.slice(0, dm.index) + " " + part.slice(dm.index + dm[0].length)).replace(/\s+/g, " ").trim(); }
+    else {                                                            // "FUL2-1 2" (from FUL2-1=2): a bare number next to a key = hours
+      const bk = part.match(QL_KEY);
+      if (bk) {
+        const rest = part.slice(0, bk.index) + " " + part.slice(bk.index + bk[0].length), nm = rest.match(/(?:^|\s)(\d+(?:\.\d+)?)(?=\s|$)/);
+        if (nm) { secs = Math.round(parseFloat(nm[1]) * 3600); part = (bk[0] + " " + rest.replace(nm[0], " ")).replace(/\s+/g, " ").trim(); }
+      }
+    }
     let tpl = null, issue = null, error = "";
     const km = part.match(/\b([A-Z][A-Z0-9_]*-\d+)\b/i);
     if (km) {
@@ -182,37 +194,43 @@ function qlParse(text, now = new Date()) {
       else error = m.alts.length ? `“${part}” matches ${m.alts.map((a) => a.name).join(" / ")} — be more specific` : `no template matches “${part}”`;
     } else error = "what did you work on?";
     if (!secs && tpl) secs = parseDuration(tpl.duration);
-    if (!secs && !error) error = "how many hours?";
+    if (!secs && !error) error = `how many hours${issue?.key ? " for " + issue.key : ""}?`;
+    if (secs > 24 * 3600 && !error) error = `${fmtH(secs)} for ${issue?.key || tpl?.name} is more than 24h`;
     items.push({ raw, secs, tpl, issue, comment: comment || tpl?.comment || "", error });
   }
-  return { dates: [...dates].sort(), items, notes };
+  return { dates: [...dates].sort(), items, notes, fromSelection };
 }
 
 function qlHint() {
   const v = $("#qlInput").value.trim(), hint = $("#qlHint");
-  if (!v) { hint.innerHTML = '<span class="muted">e.g. <i>2h DSM, 6h AWS Connect today</i> · <i>4h bug fixing: login issue yesterday</i> · <i>8h FUL2-1234 this week</i></span>'; return; }
-  const r = qlParse(v);
-  hint.innerHTML = `<span class="ok">📅 ${r.dates.length > 3 ? `${r.dates.length} days` : r.dates.map(prettyDate).join(", ")}</span>` +
-    r.items.map((i) => i.error ? `<span class="bad">✗ ${esc(i.error)}</span>` : `<span class="ok">✓ ${fmtH(i.secs)} → ${esc(i.tpl?.name || i.issue.key)}${i.issue?.key ? " · " + esc(i.issue.key) : ""}</span>`).join("");
+  if (!v) { hint.innerHTML = '<span class="muted">e.g. <i>2h DSM, 6h AWS Connect today</i> · <i>FUL2-1234=2, FUL2-5678=6</i> · <i>4h bug fixing: login issue yesterday</i> · <i>8h FUL2-1234 this week</i></span>'; return; }
+  const r = qlParse(v, new Date(), sortedSelected());
+  const total = r.items.reduce((a, i) => a + (i.error ? 0 : i.secs), 0);
+  hint.innerHTML = `<span class="ok">📅 ${r.dates.length > 3 ? `${r.dates.length} days` : r.dates.map(prettyDate).join(", ")}${r.fromSelection ? " (selected on calendar)" : ""}</span>` +
+    (r.items.length > 1 && total ? `<span class="ok">Σ ${fmtH(total)}${r.dates.length > 1 ? " per day" : ""}</span>` : "") +
+    r.items.map((i) => i.error ? `<span class="bad">✗ ${esc(i.error)}</span>` : `<span class="ok">✓ ${fmtH(i.secs)} → ${i.tpl ? esc(i.tpl.name) + " · " : ""}${esc(i.issue.key)}${!i.tpl && i.issue.summary ? " " + esc(i.issue.summary.slice(0, 30)) : ""}</span>`).join("");
 }
 
 async function qlSubmit() {
   if (!S.me) { toast("Connect Jira first"); return; }
-  const r = qlParse($("#qlInput").value);
-  if (!r.items.length) { toast("Type what you worked on, e.g. 2h DSM"); return; }
+  const r = qlParse($("#qlInput").value, new Date(), sortedSelected());
+  if (!r.items.length) { toast("Type what you worked on, e.g. 2h DSM or FUL2-1234=2"); return; }
   const bad = r.items.find((i) => i.error); if (bad) { toast(bad.error); return; }
-  try {
-    for (const it of r.items) if (it.issue?.lookup) {
-      const is = await jira(API.issueByKey(it.issue.key));
-      it.issue = { id: String(is.id), key: is.key, summary: is.fields?.summary || "" }; idxAdd([it.issue], "recent");
-    }
-    await ensureDates(r.dates);
-  } catch (e) { toast(e.status === 404 ? "Issue not found in Jira" : e.message); return; }
+  // look up keys that are not in this browser's issue list yet (each key once, 5 at a time)
+  const keys = [...new Set(r.items.filter((it) => it.issue?.lookup).map((it) => it.issue.key))], found = {}, missing = [];
+  await pool(keys, 5, async (key) => {
+    try { const is = await jira(API.issueByKey(key)); found[key] = { id: String(is.id), key: is.key, summary: is.fields?.summary || "" }; }
+    catch (e) { missing.push(e.status === 404 ? key : `${key} (${e.message})`); }
+  });
+  if (missing.length) { toast(`Not found in Jira: ${missing.join(", ")}`); return; }
+  for (const it of r.items) if (it.issue?.lookup) it.issue = found[it.issue.key];
+  idxAdd(Object.values(found), "recent");
+  try { await ensureDates(r.dates); } catch (e) { toast(e.message); return; }
   openPreview(r.dates.flatMap((d) => r.items.map((it) => makeJob(it.issue, d, secsToDur(it.secs), it.comment))));
 }
 
 window.openDay = openDay;
-window.JTD = { qlParse, renderToday, openDay };
+window.JTD = { qlParse, qlHint, renderToday, openDay };
 
 (function dayInit() {
   JT.onReady(renderToday);

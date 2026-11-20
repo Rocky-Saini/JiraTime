@@ -73,7 +73,7 @@
       <div class="card">
         <h3>Worklog configuration</h3>
         <div class="quicklog">
-          <div class="ql-row"><input id="qlInput" placeholder="⚡ Quick log: 2h DSM, 6h AWS Connect today" autocomplete="off" aria-label="Quick log"><button id="qlGo" class="small">Log ▶</button></div>
+          <div class="ql-row"><input id="qlInput" placeholder="⚡ Quick log: 2h DSM, 6h AWS Connect today  ·  or  FUL2-1234=2, FUL2-5678=6" autocomplete="off" aria-label="Quick log"><button id="qlGo" class="small">Log ▶</button></div>
           <div id="qlHint" class="ql-hint"></div>
         </div>
         <div id="suggest" class="suggest hidden"></div>
@@ -351,9 +351,10 @@
 
       <div class="card" id="h-quick">
         <h3>4 · Quick log</h3>
-        <p>Type in the ⚡ box at the top of <i>Worklog configuration</i> and press Enter. A preview opens before anything is sent.</p>
+        <p>Type in the ⚡ box at the top of <i>Worklog configuration</i> and press Enter. A preview opens before anything is sent. If you write no date, the days <b>selected on the calendar</b> are used, otherwise today.</p>
         <table class="help-tbl">
           <tr><td><code>2h DSM, 6h AWS Connect today</code></td><td>two entries today, using your templates</td></tr>
+          <tr><td><code>FUL2-315551=2, FUL2-314700=6</code><br><code>FUL2-315551=2 | FUL2-314700=5.5</code></td><td>Jira key = hours. Separate with <code>,</code> <code>|</code> <code>;</code> or just spaces; spaces around <code>=</code> are fine. Hours can be <code>2</code>, <code>1.5</code>, <code>2h30m</code>, <code>90m</code>. Add <code>:comment</code> after the hours, e.g. <code>FUL2-1=2:code review</code></td></tr>
           <tr><td><code>4h bug fixing: login issue yesterday</code></td><td>text after <code>:</code> becomes the comment</td></tr>
           <tr><td><code>8h FUL2-1234 this week</code></td><td>a Jira key directly, every working day this week</td></tr>
           <tr><td><code>1h 30m testing mon</code> · <code>2h dsm last monday</code></td><td>weekday names</td></tr>
@@ -459,7 +460,6 @@
           <dt>Jira refuses to edit, move or delete a worklog</dt><dd>The period may be locked in Jira/Clockwork or you lack permission; the message from Jira is shown.</dd>
           <dt>The auto-log did not run</dt><dd>The JiraTime tab was closed or asleep at that time. Open it — missed days are offered. Check the run log on the Automation page.</dd>
           <dt>NewersWorld says “not connected”</dt><dd>Open NewersWorld with the button on this page and click the bookmark in that tab. Re-create the bookmark if you moved JiraTime to a new address.</dd>
-          <dt>Port 3000 already in use (local)</dt><dd>An older <code>node server.js</code> is still running. Stop it (Ctrl+C in its terminal) and start again.</dd>
         </dl>
       </div>
     </div>

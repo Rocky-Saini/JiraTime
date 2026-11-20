@@ -225,29 +225,41 @@ function idxAdd(list, src) {
     if (!i || !i.id || !i.key) continue;
     const id = String(i.id), cur = IDX.items[id] || {};
     IDX.items[id] = { id, key: i.key, summary: i.summary || cur.summary || "", status: i.status || cur.status || "",
-      open: src === "open" || !!cur.open, used: src === "recent" ? now : cur.used || 0, seen: now };
+      open: src === "open" || !!cur.open, used: src === "recent" ? now : cur.used || 0, seen: now,
+      lastLog: [cur.lastLog || "", i.lastLog || ""].sort().pop() };
   }
   idxSave();
 }
-function idxSearch(q, limit = 25) {
-  const toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean), q0 = toks.join(" "), now = Date.now();
+const agoText = (t) => { const s = (Date.now() - t) / 1000; return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`; };
+/** Search results in groups: 🕘 Recent (last picked first) · ★ Pinned · 👤 Assigned to me · 📝 Logged recently · Jira / other matches. */
+function idxGroups(q, remote) {
+  const toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean), q0 = toks.join(" ");
   const pins = new Set(S.pinned.map((p) => String(p.id)));
   const all = new Map(Object.entries(IDX.items));
   for (const p of S.pinned) { const id = String(p.id), cur = all.get(id) || {}; all.set(id, { ...cur, id, key: p.key, summary: p.summary || cur.summary || "" }); }
-  const out = [];
-  for (const i of all.values()) {
-    const hay = `${i.key} ${i.summary || ""}`.toLowerCase();
-    if (toks.length && !toks.every((t) => hay.includes(t))) continue;
-    const key = i.key.toLowerCase();
-    let sc = 0;
-    if (q0 && key === q0) sc += 1000; else if (q0 && key.startsWith(q0)) sc += 500;
-    if (pins.has(i.id)) sc += 300;
-    if (i.used) sc += 200 + Math.max(0, 100 - ((now - i.used) / 864e5) * 3);
-    if (i.open) sc += 80;
-    out.push({ sc: sc + (i.seen || 0) / 1e14, i });
-  }
-  return out.sort((a, b) => b.sc - a.sc).slice(0, limit).map(({ i }) => ({ id: i.id, key: i.key, summary: i.summary || "", status: i.status || "", pin: pins.has(i.id) }));
+  for (const r of remote || []) if (!all.has(r.id)) all.set(r.id, { ...r });
+  const match = (i) => !toks.length || toks.every((t) => `${i.key} ${i.summary || ""}`.toLowerCase().includes(t));
+  const keyScore = (i) => { const k = i.key.toLowerCase(); return q0 && k === q0 ? 2 : q0 && k.startsWith(q0) ? 1 : 0; };
+  const shown = new Set(), groups = [];
+  const view = (i, extra) => ({ id: i.id, key: i.key, summary: i.summary || "", status: i.status || IDX.items[i.id]?.status || "", pin: pins.has(i.id), ...extra });
+  const add = (id, title, list, max, extra = () => ({})) => {
+    const items = list.filter((i) => !shown.has(i.id)).slice(0, max);
+    items.forEach((i) => shown.add(i.id));
+    if (items.length) groups.push({ id, title, items: items.map((i) => view(i, extra(i))) });
+  };
+  const local = [...all.values()].filter(match);
+  if (q0) add("best", "Best match", local.filter((i) => keyScore(i) === 2), 1);
+  add("recent", "🕘 Recent", local.filter((i) => i.used).sort((a, b) => b.used - a.used), q0 ? 6 : 8, (i) => ({ recent: i.used }));
+  add("pinned", "★ Pinned", local.filter((i) => pins.has(i.id)), 10);
+  add("open", "👤 Assigned to me", local.filter((i) => i.open).sort((a, b) => keyScore(b) - keyScore(a) || (b.seen || 0) - (a.seen || 0)), q0 ? 6 : 8);
+  add("logged", "📝 Logged recently", local.filter((i) => i.lastLog).sort((a, b) => keyScore(b) - keyScore(a) || b.lastLog.localeCompare(a.lastLog)), q0 ? 6 : 6, (i) => ({ lastLog: i.lastLog }));
+  if (remote) add("jira", "🔎 From Jira", remote.map((r) => all.get(r.id) || r), 15);
+  if (q0) add("other", "Other matches", local.sort((a, b) => keyScore(b) - keyScore(a) || (b.seen || 0) - (a.seen || 0)), 8);
+  return groups;
 }
+function idxForget(id) { const i = IDX.items[id]; if (i) { i.used = 0; idxSave(); } }
+function idxClearRecent() { Object.values(IDX.items).forEach((i) => { i.used = 0; }); idxSave(); }
+
 async function idxRefreshOpen(force) {
   if (!S.me || (!force && Date.now() - IDX.openAt < 30 * 60e3)) return;
   try {
@@ -288,7 +300,7 @@ async function loadMonth(y, m, force = false) {
   });
   S.months[key] = data; delete S.loadErr[key];
   saveMonthCache(key, data);
-  idxAdd(Object.values(data.issues), "worklog");
+  idxAdd(Object.values(data.issues).map((i) => ({ ...i, lastLog: Object.keys(data.byIssue[i.id] || {}).sort().pop() || "" })), "worklog");
   JT.emit("data", { key });
   return data;
 }
@@ -396,6 +408,7 @@ function renderSelection() {
   $("#summary").innerHTML = `<b>${dates.length}</b> dates × <b>${valid.length}</b> issue(s) = <b>${dates.length * valid.length}</b> entries · <b>${fmtH(perDay * dates.length)}</b> total`;
   $("#previewBtn").disabled = !dates.length || !valid.length || !S.me;
   $("#fillMonth").disabled = (!valid.length && !window.JTT?.hasPlans?.()) || !S.me;
+  if ($("#qlInput")?.value) window.JTD?.qlHint?.();          // quick log follows the calendar selection
 }
 
 function toggleDate(d, shift) {
@@ -464,50 +477,60 @@ function renderAll() {
 
 // ================= issue search (shared) =================
 function attachIssueSearch(input, resDiv, onPick) {
-  let timer, seq = 0, list = [], act = -1;
-  const rowHtml = (i) => `<div data-id="${esc(i.id)}" data-key="${esc(i.key)}" data-sum="${esc(i.summary)}">${i.pin ? "★ " : ""}${esc(i.key)}${i.status ? ` <span class="ist">${esc(i.status)}</span>` : ""} <small>${esc(i.summary)}</small></div>`;
-  const show = (items, note) => {
-    list = items; act = -1;
-    resDiv.innerHTML = (items.map(rowHtml).join("") + (note ? `<div class="muted tiny rnote">${esc(note)}</div>` : "")) || '<div class="muted rnote">No issues</div>';
+  let timer, seq = 0, list = [], act = -1, lastQ = "", lastRemote = null, lastNote = "";
+  const rowHtml = (i) => `<div class="rrow" data-id="${esc(i.id)}" data-key="${esc(i.key)}" data-sum="${esc(i.summary)}">
+      <div class="rtop"><span class="rkey">${i.pin ? "★ " : ""}${esc(i.key)}</span>${i.status ? `<span class="ist">${esc(i.status)}</span>` : ""}
+        <span class="rmeta">${i.recent ? esc(agoText(i.recent)) : i.lastLog ? "logged " + esc(prettyDate(i.lastLog).slice(0, 6)) : ""}</span>
+        ${i.recent ? `<button class="rforget" data-forget="${esc(i.id)}" title="Remove from Recent" tabindex="-1">✕</button>` : ""}</div>
+      <small>${esc(i.summary)}</small></div>`;
+  const render = (q, remote, note) => {
+    lastQ = q; lastRemote = remote; lastNote = note;
+    const groups = idxGroups(q, remote);
+    list = groups.flatMap((g) => g.items); act = list.length ? 0 : -1;
+    resDiv.innerHTML = groups.map((g) => `<div class="rhead"><span>${esc(g.title)}</span>${g.id === "recent" ? '<button class="rclear" data-clearrecent tabindex="-1">clear</button>' : ""}</div>` + g.items.map(rowHtml).join("")).join("") +
+      (note ? `<div class="muted tiny rnote">${esc(note)}</div>` : "") || '<div class="muted rnote">No issues — type a key or words from the summary</div>';
+    resDiv.querySelector("[data-id]")?.classList.add("act");
     resDiv.classList.remove("hidden");
   };
-  const merge = (...lists) => { const seen = new Set(); return lists.flat().filter((i) => i && !seen.has(i.id) && seen.add(i.id)).slice(0, 25); };
   const remote = async (q, my) => {
+    if (!q) { if (my === seq) render(q, null, ""); return; }          // empty box: your own lists only
     let hit = PICK.get(q);                                  // one Jira call per query: shared while in flight, reused for 5 min
     if (!hit || Date.now() - hit.at > 5 * 60e3) {
       hit = { at: Date.now(), p: jira(API.picker(q)).then((r) => (r.sections || []).flatMap((x) => x.issues || []).map((i) => ({ id: String(i.id), key: i.key, summary: i.summaryText || i.summary || "" }))) };
       PICK.set(q, hit);
-      hit.p.then((list) => idxAdd(list, "search"), () => PICK.delete(q));
+      hit.p.then((l) => idxAdd(l, "search"), () => PICK.delete(q));
     }
     let found;
-    try { found = await hit.p; } catch (e) { if (my === seq) show(idxSearch(q), e.message); return; }
+    try { found = await hit.p; } catch (e) { if (my === seq) render(q, null, e.message); return; }
     if (my !== seq || resDiv.classList.contains("hidden")) return;
-    const local = idxSearch(q);
-    show(merge(local.filter((i) => i.pin), local.slice(0, 6), found.map((i) => ({ ...i, status: IDX.items[i.id]?.status || "", pin: isPinned(i.id) })), local));
+    render(q, found, "");
   };
-  const run = (delay) => {
-    const q = input.value.trim(), my = ++seq;
-    show(idxSearch(q), "⟳ searching Jira…");                // instant: from this browser's issue index
-    clearTimeout(timer); timer = setTimeout(() => remote(q, my), delay);
+  const run = (delay, all) => {
+    const q = all ? "" : input.value.trim(), my = ++seq;      // on focus: show the full lists, filter once the user types
+    render(q, null, q ? "⟳ searching Jira…" : "");          // instant: from this browser's issue lists
+    clearTimeout(timer); timer = setTimeout(() => remote(q, my), q ? delay : 0);
   };
   const pick = (i) => { resDiv.classList.add("hidden"); input.blur(); idxAdd([i], "recent"); onPick({ id: i.id, key: i.key, summary: i.summary }); };
-  input.addEventListener("focus", () => { input.select(); run(0); });
+  const mark = () => { const rows = resDiv.querySelectorAll("[data-id]"); rows.forEach((d, k) => d.classList.toggle("act", k === act)); rows[act]?.scrollIntoView({ block: "nearest" }); };
+  input.addEventListener("focus", () => { input.select(); run(0, true); });
   input.addEventListener("input", () => run(250));
   input.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { resDiv.classList.add("hidden"); input.blur(); return; }
-    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && list.length) {
-      e.preventDefault();
-      act = (act + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length;
-      const rows = resDiv.querySelectorAll("[data-id]");
-      rows.forEach((d, k) => d.classList.toggle("act", k === act)); rows[act]?.scrollIntoView({ block: "nearest" });
-    }
+    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && list.length) { e.preventDefault(); act = (act + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length; mark(); }
     if (e.key === "Enter" && list.length) { e.preventDefault(); pick(list[Math.max(0, act)]); }
   });
   input.addEventListener("blur", () => setTimeout(() => resDiv.classList.add("hidden"), 200));
   resDiv.addEventListener("mousedown", (e) => {
+    e.preventDefault();                                     // keep the focus in the box
+    const f = e.target.closest("[data-forget]");
+    if (f) { idxForget(f.dataset.forget); render(lastQ, lastRemote, lastNote); return; }
+    if (e.target.closest("[data-clearrecent]")) { idxClearRecent(); render(lastQ, lastRemote, lastNote); return; }
     const d = e.target.closest("[data-id]"); if (!d) return;
-    e.preventDefault();
     pick({ id: d.dataset.id, key: d.dataset.key, summary: d.dataset.sum });
+  });
+  resDiv.addEventListener("mousemove", (e) => {
+    const d = e.target.closest("[data-id]"); if (!d) return;
+    const k = [...resDiv.querySelectorAll("[data-id]")].indexOf(d); if (k !== act) { act = k; resDiv.querySelectorAll("[data-id]").forEach((x, n) => x.classList.toggle("act", n === act)); }
   });
 }
 
@@ -722,6 +745,7 @@ async function runSubmission(jobs, start, dry) {
   }
   jobs.filter((j) => j.status === "processing" || j.status === "pending").forEach((j) => { j.status = "failed"; j.error ||= "Not attempted"; });
   if (!dry) {
+    idxAdd([...new Map(jobs.filter((j) => j.status === "success").map((j) => [String(j.issue.id), j.issue])).values()], "recent");
     for (const j of jobs) if (j.comment && j.status === "success" && !S.comments.includes(j.comment)) S.comments.unshift(j.comment);
     S.comments = S.comments.slice(0, 20); await store.set("comments", S.comments);
   }
