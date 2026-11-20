@@ -280,7 +280,7 @@ async function loadMonth(y, m, force = false) {
       if (w.author?.accountId !== S.me.accountId) continue;
       const date = String(w.started).slice(0, 10);
       if (date < from || date > to) continue;
-      const entry = { id: w.id, issueId: is.id, issueKey: is.key, secs: w.timeSpentSeconds, comment: typeof w.comment === "string" ? w.comment : "", author: w.author.displayName, date };
+      const entry = { id: w.id, issueId: is.id, issueKey: is.key, secs: w.timeSpentSeconds, comment: typeof w.comment === "string" ? w.comment : "", author: w.author.displayName, date, started: String(w.started || "") };
       (data.byDate[date] ||= { secs: 0, entries: [] }).secs += entry.secs;
       data.byDate[date].entries.push(entry);
       ((data.byIssue[is.id] ||= {})[date] ||= []).push(entry);

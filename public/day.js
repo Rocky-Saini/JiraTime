@@ -23,13 +23,14 @@ function renderDay(date) {
     ${hol ? `<p class="muted">🏖 ${esc(hol.label)} (${esc(hol.type)})</p>` : ""}
     <p style="margin:10px 0 4px"><b>${fmtH(day.secs)}</b> of ${S.settings.target}h logged</p>
     <div class="progress"><div style="height:100%;width:${Math.min(100, (day.secs / target) * 100)}%;background:${day.secs > target ? "var(--bad)" : "linear-gradient(90deg,var(--acc),var(--acc2))"}"></div></div>
-    <div class="scroll"><table class="dytable"><tr><th>Issue</th><th>Hours</th><th>Comment</th><th></th></tr>
+    <div class="scroll"><table class="dytable"><tr><th>Issue</th><th>Date</th><th>Hours</th><th>Comment</th><th></th></tr>
       ${day.entries.map((e, i) => `<tr data-i="${i}">
         <td><b>${esc(e.issueKey)}</b><small class="muted">${esc((md.issues[e.issueId]?.summary || "").slice(0, 60))}</small></td>
+        <td><input class="dyd" type="date" value="${esc(date)}" aria-label="Date" title="Change the date to move this worklog to another day"></td>
         <td><input class="dyh" value="${esc(secsToDur(e.secs))}" aria-label="Hours"></td>
         <td><input class="dyc" value="${esc(e.comment)}" aria-label="Comment"></td>
         <td class="nowrap"><button class="small dysave" disabled>Save</button> <button class="small danger dydel" title="Delete this worklog">🗑</button></td></tr>`).join("") ||
-        '<tr><td colspan="4" class="muted">No worklogs on this day.</td></tr>'}
+        '<tr><td colspan="5" class="muted">No worklogs on this day.</td></tr>'}
     </table></div>
     <h4>Add work</h4>
     <div class="row-actions">
@@ -40,10 +41,15 @@ function renderDay(date) {
   const box = $("#modalBox");
   $("#dyClose").onclick = closeModal;
   box.querySelectorAll(".dytable tr[data-i]").forEach((tr) => {
-    const e = day.entries[+tr.dataset.i], h = tr.querySelector(".dyh"), c = tr.querySelector(".dyc"), save = tr.querySelector(".dysave");
-    const dirty = () => { save.disabled = !(parseDuration(h.value) && (parseDuration(h.value) !== e.secs || c.value.trim() !== e.comment)); h.style.borderColor = parseDuration(h.value) ? "" : "var(--bad)"; };
-    h.addEventListener("input", dirty); c.addEventListener("input", dirty);
-    save.onclick = () => saveEntry(date, e, h.value, c.value.trim(), save);
+    const e = day.entries[+tr.dataset.i], h = tr.querySelector(".dyh"), c = tr.querySelector(".dyc"), dd = tr.querySelector(".dyd"), save = tr.querySelector(".dysave");
+    const dirty = () => {
+      const okH = !!parseDuration(h.value), okD = /^\d{4}-\d{2}-\d{2}$/.test(dd.value), moved = okD && dd.value !== date;
+      save.disabled = !(okH && okD && (parseDuration(h.value) !== e.secs || c.value.trim() !== e.comment || moved));
+      save.textContent = moved ? "Move" : "Save";
+      h.style.borderColor = okH ? "" : "var(--bad)"; dd.style.borderColor = moved ? "var(--acc)" : "";
+    };
+    h.addEventListener("input", dirty); c.addEventListener("input", dirty); dd.addEventListener("input", dirty); dd.addEventListener("change", dirty);
+    save.onclick = () => saveEntry(date, e, h.value, c.value.trim(), save, dd.value);
     tr.querySelector(".dydel").onclick = () => deleteEntry(date, e);
   });
   $("#dyFill")?.addEventListener("click", async () => {
@@ -60,16 +66,36 @@ function renderDay(date) {
   };
 }
 
-async function saveEntry(date, e, hours, comment, btn) {
+/** Keep the original time of day and timezone; only the date part changes. */
+function movedStarted(e, newDate) {
+  return /^\d{4}-\d{2}-\d{2}T/.test(e.started || "") ? newDate + e.started.slice(10) : startedStamp(newDate, S.settings.start || "10:00");
+}
+
+async function saveEntry(date, e, hours, comment, btn, newDate = date) {
   const secs = parseDuration(hours); if (!secs) { toast("Hours look wrong (e.g. 2h, 1h 30m)"); return; }
-  btn.disabled = true; btn.textContent = "Saving…";
+  const moving = newDate && newDate !== date;
+  const label = btn.textContent;
+  if (moving) {
+    try { await ensureDates([newDate]); } catch (err) { toast("Could not read the target day: " + err.message); return; }
+    const there = monthData(newDate).byDate[newDate]?.secs || 0, warn = [];
+    if (isWeekend(newDate)) warn.push("it is a weekend");
+    if (holidayOf(newDate)) warn.push(`it is marked as ${holidayOf(newDate).type} (${holidayOf(newDate).label})`);
+    if (newDate > todayStr()) warn.push("it is in the future");
+    if (there + secs > S.settings.target * 3600) warn.push(`that day would have ${fmtH(there + secs)} (more than ${S.settings.target}h)`);
+    if (!confirm(`Move ${fmtH(secs)} on ${e.issueKey} from ${prettyDate(date)} to ${prettyDate(newDate)}?` + (warn.length ? `\n\nNote: ${warn.join("; ")}.` : ""))) return;
+  }
+  btn.disabled = true; btn.textContent = moving ? "Moving…" : "Saving…";
   try {
-    await jira(API.editWorklog(e.issueId, e.id), { method: "PUT", body: JSON.stringify({ timeSpentSeconds: secs, comment }) });
-    S.history.unshift({ id: uid(), ts: new Date().toISOString(), date, issueKey: e.issueKey, issueId: String(e.issueId), duration: secsToDur(secs), comment, status: "edited", error: `was ${secsToDur(e.secs)}`, worklogId: e.id });
+    const body = { timeSpentSeconds: secs, comment };
+    if (moving) body.started = movedStarted(e, newDate);
+    await jira(API.editWorklog(e.issueId, e.id), { method: "PUT", body: JSON.stringify(body) });
+    const note = [moving ? `moved from ${prettyDate(date)}` : "", secs !== e.secs ? `was ${secsToDur(e.secs)}` : ""].filter(Boolean).join(", ");
+    S.history.unshift({ id: uid(), ts: new Date().toISOString(), date: moving ? newDate : date, issueKey: e.issueKey, issueId: String(e.issueId), duration: secsToDur(secs), comment, status: moving ? "moved" : "edited", error: note, worklogId: e.id });
     await store.set("history", S.history);
-    await reloadMonths([date.slice(0, 7)]);
-    renderCalendar(); renderDay(date); toast("Worklog updated");
-  } catch (err) { btn.disabled = false; btn.textContent = "Save"; toast("Update failed: " + err.message); }
+    await reloadMonths([date.slice(0, 7), newDate.slice(0, 7)]);
+    renderCalendar(); renderDay(date);
+    toast(moving ? `Moved to ${prettyDate(newDate)}` : "Worklog updated");
+  } catch (err) { btn.disabled = false; btn.textContent = label; toast((moving ? "Move failed: " : "Update failed: ") + err.message); }
 }
 
 async function deleteEntry(date, e) {

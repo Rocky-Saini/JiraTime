@@ -114,13 +114,42 @@ function fdRender() {
   const timePanel = `<div class="fd grp">Time tracking</div><div class="fd tt" style="grid-column:1/-1">
     <div class="tt-row"><span><b>${esc(t.spent || "0m")}</b> logged</span><span>Original estimate: <b>${esc(t.orig || "not set")}</b></span><span>Remaining: <b>${esc(t.rem || "—")}</b></span></div>
     <div class="progress" style="margin:8px 0 0"><div style="height:100%;width:${pct}%;background:${t.origS && t.spentS > t.origS ? "var(--bad)" : "linear-gradient(90deg,var(--acc),var(--acc2))"}"></div></div>
-    ${t.origS ? `<div class="was">${pct}% of estimate used${t.spentS > t.origS ? " — over estimate" : ""}</div>` : '<div class="was">Set an Original estimate below to track progress.</div>'}</div>`;
+    ${t.origS ? `<div class="was">${pct}% of estimate used${t.spentS > t.origS ? " — over estimate" : ""}</div>` : '<div class="was">Set an Original estimate below to track progress.</div>'}
+    <div id="fdAi" class="fdai"></div></div>`;
   box.innerHTML = timePanel + (key.length ? '<div class="fd grp">Key fields</div>' + key.map((f) => card(f, false)).join("") : '<div class="fd grp">None of the usual fields exist on this issue — add fields below.</div>') +
     (filled.length ? '<div class="fd grp">Already filled in Jira</div>' + filled.map((f) => card(f, false)).join("") : "") +
     (extra.length ? '<div class="fd grp">Your extra fields</div>' + extra.map((f) => card(f, true)).join("") : "");
   const shown = new Set([...key, ...extra, ...filled].map((f) => f.key));
   $("#fdAdd").innerHTML = '<option value="">＋ Add another field…</option>' + FD.fields.filter((f) => !shown.has(f.key)).sort((a, b) => a.name.localeCompare(b.name)).map((f) => `<option value="${esc(fdNorm(f.name))}">${esc(f.name)}</option>`).join("");
-  fdFooter();
+  fdFooter(); fdAiLine();
+}
+
+/** Live AI efficiency for the issue being edited (uses the values on screen, saved or not). */
+function fdAiLine() {
+  const el = $("#fdAi"); if (!el || !window.AIEFF) return;
+  const savedFields = FD.fields.filter((f) => f.kind === "number" && fdNorm(f.name).startsWith("aitimesaved"));
+  if (!savedFields.length) { el.innerHTML = ""; return; }
+  const est = FD.fields.find((f) => f.kind === "estimate");
+  const estS = est && est.key in FD.edits ? AIEFF.jiraSecs(FD.edits[est.key]) : FD.time?.origS || 0;
+  const savedH = savedFields.reduce((a, f) => a + (Number(fdVal(f)) || 0), 0);
+  const pct = AIEFF.pct(savedH, estS), b = AIEFF.bands;
+  el.innerHTML = `<span class="muted">AI efficiency</span> ${AIEFF.badge(pct)}
+    <span class="muted tiny">${estS ? `${Math.round(savedH * 100) / 100}h saved of ${secsToDur(estS)} estimate · target ${b.min}–${b.good}%, max ${b.max}%` : "Set an Original estimate to calculate it"}</span>`;
+}
+
+/** Fill values by field name (from the AI report). Nothing is saved until the user presses Save. */
+function fdApplyValues(values) {
+  const done = [], skip = [];
+  for (const [name, v] of Object.entries(values || {})) {
+    const f = FD.fields.find((x) => fdNorm(x.name) === fdNorm(name));
+    if (!f) { skip.push(name); continue; }
+    if (f.kind === "option" && v && !f.allowed.some((o) => fdLabel(o) === v)) { skip.push(name); continue; }
+    fdSet(f, f.kind === "number" ? Number(v) : v); done.push(f.name);
+    if (!fdShown().key.includes(f) && !FD.extra.includes(fdNorm(f.name))) FD.extra.push(fdNorm(f.name));
+  }
+  fdRender();
+  if (done.length) toast(`Filled ${done.join(", ")} — review and press Save changes`);
+  if (skip.length) toast(`Not available on this issue: ${skip.join(", ")}`);
 }
 
 function fdFooter() {
@@ -133,7 +162,7 @@ function fdSet(f, v) {
   if (fdSame(v, FD.cur[f.key])) delete FD.edits[f.key]; else FD.edits[f.key] = v;
   const card = $(`#fdForm [data-f="${CSS.escape(f.key)}"]`);
   if (card) { card.classList.toggle("dirty", f.key in FD.edits); card.querySelector(".was").textContent = f.key in FD.edits ? "was: " + fdShow(FD.cur[f.key]) : ""; }
-  fdFooter();
+  fdFooter(); fdAiLine();
 }
 
 // ---------- save ----------
@@ -150,6 +179,7 @@ async function fdSave() {
     for (const [k, v] of Object.entries(FD.edits)) fields[k] = fdToApi(FD.fields.find((f) => f.key === k), v);
     await jira(`/rest/api/2/issue/${encodeURIComponent(FD.issue.key)}`, { method: "PUT", body: JSON.stringify({ fields }) });
     closeModal(); toast(`Saved ${Object.keys(fields).length} field(s) on ${FD.issue.key}`);
+    JT.emit("issue", { key: FD.issue.key });
     await fdLoadIssue(FD.issue);
   } catch (e) {
     openModal(`<h3>Jira rejected the update</h3><p class="st-failed">${esc(e.message)}</p><p class="muted tiny">Common reasons: the field is not on this issue's edit screen, or a required value is missing.</p><div class="foot"><button id="fdOk" class="primary">Close</button></div>`);
@@ -228,9 +258,14 @@ function fdBulkDialog() {
 }
 
 // ---------- entry points ----------
-window.openIssueFields = (issue) => { document.querySelector('.nav[data-view="fields"]').click(); fdLoadIssue(issue); };
+window.openIssueFields = async (issue, values) => {
+  document.querySelector('.nav[data-view="fields"]').click();
+  await fdLoadIssue(issue);
+  if (values && FD.fields.length) fdApplyValues(values);
+};
 
 (async function fdInit() {
+  JT.on("aibands", fdAiLine);
   FD.extra = await store.get("fdExtra", []); FD.presets = await store.get("fdPresets", []); fdRenderPresets();
   attachIssueSearch($("#fdSearch"), $("#fdRes"), (i) => { $("#fdSearch").value = ""; fdLoadIssue(i); });
   $("#fdSave").onclick = fdConfirm; $("#fdBulk").onclick = fdBulkDialog; $("#fdDates").onclick = fdDatesFromWorklogs; $("#fdPresetSave").onclick = fdPresetSave;

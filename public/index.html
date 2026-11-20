@@ -15,9 +15,11 @@
     <button class="nav" data-view="templates">🧩 Templates</button>
     <button class="nav" data-view="automation">⏰ Automation</button>
     <button class="nav" data-view="fields">📝 Issue fields</button>
+    <button class="nav" data-view="ai">🤖 AI efficiency</button>
     <button class="nav" data-view="reports">📊 Reports</button>
     <button class="nav" data-view="history">🕘 History &amp; Undo</button>
     <button class="nav" data-view="settings">⚙️ Settings</button>
+    <button class="nav" data-view="help">📖 How to use</button>
   </nav>
   <div class="side-foot"><button class="nav nwnav" data-view="nw">🏢 NewersWorld Timesheet</button><button id="themeBtn" class="ghost">🌗 Theme</button></div>
 </aside>
@@ -255,6 +257,214 @@
     </div>
   </section>
 
+  <!-- AI EFFICIENCY -->
+  <section id="view-ai" class="view">
+    <div class="row-actions">
+      <h3 style="margin:0">🤖 AI efficiency</h3><span id="aiInfo" class="muted tiny"></span>
+      <div class="grow"></div>
+      <select id="aiPeriod" aria-label="Which issues">
+        <option value="month">Issues I logged work on — month shown on the calendar</option>
+        <option value="prev">Issues I logged work on — last month</option>
+        <option value="q">Issues I logged work on — last 3 months</option>
+        <option value="open">My open issues (assigned to me)</option>
+      </select>
+      <button id="aiRefresh" class="small">⟳ Refresh</button>
+      <button id="aiCsv" class="small">⬇ Export CSV</button>
+    </div>
+    <div class="card airule">
+      <div><b>AI efficiency = AI time saved ÷ Original estimate.</b> AI time saved is the sum of all “AI Time Saved – … (Hours)” fields (Development, Testing, Documentation).
+        <div id="aiRule" class="tiny" style="margin-top:6px"></div></div>
+      <div class="aibands">
+        <label>Minimum <span class="pctin"><input id="aiMin" type="number" min="0" max="100" step="1"> %</span></label>
+        <label>Green up to <span class="pctin"><input id="aiGood" type="number" min="0" max="100" step="1"> %</span></label>
+        <label>Maximum <span class="pctin"><input id="aiMax" type="number" min="0" max="100" step="1"> %</span></label>
+        <button id="aiReset" class="small ghost">Reset 10 / 20 / 40</button>
+      </div>
+    </div>
+    <div id="aiWarn"></div>
+    <div id="aiStats" class="stats aistats"></div>
+    <div class="card"><div class="scroll"><table id="aiTable" class="aitable"></table></div>
+      <p class="muted tiny">Click a coloured box above to filter. “Set dev … → 15%” opens Issue fields with “AI Time Saved – Development (Hours)” filled in so the issue lands in the middle of the green band — you review and press Save. Nothing is changed in Jira from this page.</p></div>
+  </section>
+
+  <!-- HOW TO USE -->
+  <section id="view-help" class="view">
+    <div class="help">
+      <div class="card help-hero">
+        <h2>📖 How to use JiraTime</h2>
+        <p>JiraTime fills your Jira worklogs for many days at once, logs your normal day automatically, keeps Issue fields (estimate, dev dates, AI usage) up to date, and syncs the NewersWorld timesheet.</p>
+        <div id="helpToc" class="help-toc">
+          <button class="small" data-sec="h-start">1 · Getting started</button>
+          <button class="small" data-sec="h-cal">2 · Calendar &amp; bulk fill</button>
+          <button class="small" data-sec="h-day">3 · Day details: edit, move, delete</button>
+          <button class="small" data-sec="h-quick">4 · Quick log</button>
+          <button class="small" data-sec="h-tpl">5 · Templates &amp; day plans</button>
+          <button class="small" data-sec="h-auto">6 · Daily auto-log &amp; reminder</button>
+          <button class="small" data-sec="h-week">7 · Weekly grid</button>
+          <button class="small" data-sec="h-fields">8 · Issue fields</button>
+          <button class="small" data-sec="h-ai">9 · AI efficiency</button>
+          <button class="small" data-sec="h-nw">10 · NewersWorld sync</button>
+          <button class="small" data-sec="h-hist">11 · History, undo &amp; reports</button>
+          <button class="small" data-sec="h-set">12 · Settings &amp; holidays</button>
+          <button class="small" data-sec="h-faq">13 · Problems &amp; answers</button>
+        </div>
+      </div>
+
+      <div class="card" id="h-start">
+        <h3>1 · Getting started</h3>
+        <ol>
+          <li>Create a Jira API token: <b>id.atlassian.com → Security → API tokens → Create API token</b>. Copy it.</li>
+          <li>Open JiraTime and click <b>Connect Jira</b> (or follow the setup wizard). Enter your site (e.g. <code>https://yourcompany.atlassian.net</code>), your Atlassian email and the token.</li>
+          <li>Tick <b>Remember on this device</b> if you want the daily auto-log. Without it the token is forgotten when you close the tab.</li>
+          <li>The <b>setup wizard</b> then asks what work you do, which Jira issue each one goes to, builds your normal day (e.g. 8h) and turns on the auto-log.</li>
+        </ol>
+        <p class="muted tiny">Your token stays in this browser only. It is sent with each request to the JiraTime proxy, which passes it to Jira and does not store it.</p>
+        <button class="small" data-go="settings">Open Settings → Run setup wizard</button>
+      </div>
+
+      <div class="card" id="h-cal">
+        <h3>2 · Calendar &amp; bulk fill</h3>
+        <ul>
+          <li><b>Colours:</b> <span class="lgx done"></span> complete (8h) · <span class="lgx partial"></span> partial · <span class="lgx missing"></span> missing (past working day, nothing logged) · striped = holiday / leave · blue = selected.</li>
+          <li><b>Hover a day</b> to see every Jira issue and the hours logged on it.</li>
+          <li><b>Select days:</b> click a day, <b>drag</b> across days for a range, or use <i>Select all working days</i> / <i>Select missing days</i>. Saturday and Sunday are skipped unless you allow them in Settings.</li>
+          <li><b>What to log:</b> pick an issue in a row (type the key or words from the summary), set hours (1h–8h buttons or e.g. <code>1h 30m</code>) and a comment. Add more rows for more issues, or load a template / day plan.</li>
+          <li><b>Preview &amp; submit:</b> shows every entry before anything is sent. Days that already have work on the same issue are unticked (skip existing). Entries on the same day get start times one after the other (10:00, 12:00 …). Tick <i>Dry run</i> to test without sending.</li>
+          <li><b>⚡ Fill my month:</b> selects every missing working day up to today and fills it with the rows, or with the day plan for that weekday.</li>
+          <li><b>⚖ Balance partial days:</b> tops up days that have less than your daily target.</li>
+          <li>Failed entries can be retried; history keeps every batch so it can be undone.</li>
+        </ul>
+        <button class="small" data-go="dashboard">Open Calendar</button>
+      </div>
+
+      <div class="card" id="h-day">
+        <h3>3 · Day details: edit, move, delete</h3>
+        <p>Click <b>⋯</b> on any day (or <i>Open day</i> on the Today card).</p>
+        <ul>
+          <li><b>Change hours or comment</b> of a worklog, then <b>Save</b>.</li>
+          <li><b>Move to another date:</b> change the <b>Date</b> of the row (e.g. 20 → 21), the button becomes <b>Move</b>. The time of day is kept. You are warned if the new day is a weekend, a holiday, in the future, or would go over your daily target.</li>
+          <li><b>🗑 Delete</b> removes the worklog from Jira (asks first).</li>
+          <li><b>Add work</b> to that day with a day plan or a single template.</li>
+        </ul>
+        <p class="muted tiny">If Jira has locked the period (e.g. a closed timesheet), Jira refuses the change and the message is shown.</p>
+      </div>
+
+      <div class="card" id="h-quick">
+        <h3>4 · Quick log</h3>
+        <p>Type in the ⚡ box at the top of <i>Worklog configuration</i> and press Enter. A preview opens before anything is sent.</p>
+        <table class="help-tbl">
+          <tr><td><code>2h DSM, 6h AWS Connect today</code></td><td>two entries today, using your templates</td></tr>
+          <tr><td><code>4h bug fixing: login issue yesterday</code></td><td>text after <code>:</code> becomes the comment</td></tr>
+          <tr><td><code>8h FUL2-1234 this week</code></td><td>a Jira key directly, every working day this week</td></tr>
+          <tr><td><code>1h 30m testing mon</code> · <code>2h dsm last monday</code></td><td>weekday names</td></tr>
+          <tr><td><code>3h testing 16/11</code> · <code>2h dsm 12 nov</code> · <code>kal 90m review</code></td><td>dates (day/month), month names, kal = yesterday</td></tr>
+          <tr><td><code>dsm</code></td><td>no hours = the template's default hours</td></tr>
+        </table>
+        <p class="muted tiny">Words are matched to template names and their <i>quick-log words</i> (Templates page). If a word matches two templates (e.g. “aws”), you are asked to be more specific.</p>
+      </div>
+
+      <div class="card" id="h-tpl">
+        <h3>5 · Templates &amp; day plans</h3>
+        <ul>
+          <li>A <b>template</b> is one kind of work: name + Jira issue + hours + comment + quick-log words. 15 starters are included (DSM, sprint ceremonies, AWS SR, AWS Connect, Lambda/API, deployment, unit testing, SIT/UAT, bug fixing, code review, production support, requirements, documentation, POC). A template with an orange border still needs its Jira issue.</li>
+          <li>A <b>day plan</b> is your normal day, e.g. <i>DSM 30m + AWS Connect 5h 30m + Unit testing 2h</i>. The badge shows the total against your target.</li>
+          <li>Mark <b>weekdays</b> on a plan to make it the default for those days (Fill my month, Today card, auto-log). Each weekday belongs to one plan, e.g. a “Monday” plan with sprint planning.</li>
+          <li>On the calendar: <i>＋ From template…</i> adds a row, <i>Save row as template</i>, <i>Day plan…</i> loads a plan into the rows, <i>Save as day plan</i> saves the current rows.</li>
+          <li><b>⬇ Export / ⬆ Import</b> shares templates and plans with your team as a JSON file (weekdays are not imported).</li>
+        </ul>
+        <button class="small" data-go="templates">Open Templates</button>
+      </div>
+
+      <div class="card" id="h-auto">
+        <h3>6 · Daily auto-log &amp; reminder</h3>
+        <ul>
+          <li>Turn on <b>Log my day plan automatically</b>, choose the time (e.g. 18:30) and the days.</li>
+          <li>At that time a <b>countdown</b> (60 s) shows what will be logged; press <i>Cancel</i> to skip today, or choose <i>Ask me first</i>.</li>
+          <li>It never adds to a day that already has work, and skips weekends, holidays and leave.</li>
+          <li>If JiraTime was closed at that time, it offers the <b>missed days</b> next time you open it.</li>
+          <li><b>It runs only while a JiraTime tab is open.</b> Keep it as a pinned tab, and in Chrome add the site under <i>Settings → Performance → Memory saver → Always keep these sites active</i>.</li>
+          <li><b>Evening reminder:</b> a desktop notification if today is not complete.</li>
+          <li><i>Dry run for today</i> shows what would be logged; the run log lists every run.</li>
+        </ul>
+        <button class="small" data-go="automation">Open Automation</button>
+      </div>
+
+      <div class="card" id="h-week">
+        <h3>7 · Weekly grid</h3>
+        <p>Issues × days for one week. Grey numbers are already logged in Jira; type hours in a cell (e.g. <code>2</code>, <code>1.5h</code>, <code>90m</code>) to add more. <i>Copy last week</i> pre-fills from last week's worklogs. <i>Review &amp; submit</i> opens the same preview as the calendar.</p>
+        <button class="small" data-go="weekly">Open Weekly grid</button>
+      </div>
+
+      <div class="card" id="h-fields">
+        <h3>8 · Issue fields</h3>
+        <ul>
+          <li>Search an issue and edit <b>Original estimate</b> (e.g. <code>1w 2d 4h</code>), <b>Actual Dev Start/End Date</b>, <b>AI Used / AI Tool Used / AI Time Saved</b> and any other editable field. Fields that already have a value are shown automatically.</li>
+          <li><b>📅 Dev dates from my worklogs</b> sets Actual Dev Start/End to your first and last worklog on the issue.</li>
+          <li><b>Presets</b> save a set of values (e.g. “AI used – Kiro”) to apply in one click; <b>Apply to other issues…</b> copies your changes to other issues.</li>
+          <li>The Time tracking box shows logged vs estimate and the live <b>AI efficiency</b> while you type.</li>
+          <li>Only the fields you change are sent, after a confirmation that lists old → new values.</li>
+        </ul>
+        <button class="small" data-go="fields">Open Issue fields</button>
+      </div>
+
+      <div class="card" id="h-ai">
+        <h3>9 · AI efficiency</h3>
+        <p><b>AI efficiency = (AI Time Saved – Development + Testing + Documentation) ÷ Original estimate.</b> Example: estimate 16h, AI saved 2h → 12.5%.</p>
+        <ul>
+          <li><span class="eff low">below 10%</span> too low — highlighted, aim for at least 10%.</li>
+          <li><span class="eff good">10–20%</span> on target (green).</li>
+          <li><span class="eff high">20–40%</span> high — allowed, check it is realistic.</li>
+          <li><span class="eff over">above 40%</span> over the maximum — highlighted.</li>
+          <li><span class="eff noest">No estimate</span> — set the Original estimate first.</li>
+        </ul>
+        <p>Choose which issues to check (this month, last month, last 3 months, or your open issues). Click a coloured box to filter. For red/orange rows, <b>Set dev … → 15%</b> opens Issue fields with the value that brings the issue to the middle of the green band; review it and press Save. The limits (10 / 20 / 40) can be changed on the page. <i>Export CSV</i> gives the full report.</p>
+        <button class="small" data-go="ai">Open AI efficiency</button>
+      </div>
+
+      <div class="card" id="h-nw">
+        <h3>10 · NewersWorld sync</h3>
+        <ol>
+          <li>Open <b>🏢 NewersWorld Timesheet</b> and drag the ⭐ <b>JiraTime Agent</b> link to your bookmarks bar (once).</li>
+          <li>Click <b>↗ Open NewersWorld</b> (you are already logged in there) and click the bookmark in that tab. The badge turns green.</li>
+          <li><b>Read NewersWorld &amp; compare</b> shows each day: will fill, already in sync, different, leave, locked. Leave dates are marked on the calendar.</li>
+          <li><b>Sync till today</b> fills the empty days from your Jira worklogs (filled, leave and locked days are left alone unless you allow overwrite).</li>
+        </ol>
+        <p class="muted tiny">If the bookmark was created on another address (e.g. localhost), delete it and drag it again from this page.</p>
+        <button class="small" data-go="nw">Open NewersWorld</button>
+      </div>
+
+      <div class="card" id="h-hist">
+        <h3>11 · History, undo &amp; reports</h3>
+        <ul>
+          <li><b>History &amp; Undo:</b> every entry JiraTime sent, edited or moved. <i>Undo batch</i> deletes a whole submission from Jira; <i>Export CSV</i> keeps a record.</li>
+          <li><b>Reports:</b> hours per day, per issue, per project and per week for the month on the calendar, a printable timesheet (PDF) and CSV.</li>
+        </ul>
+      </div>
+
+      <div class="card" id="h-set">
+        <h3>12 · Settings &amp; holidays</h3>
+        <ul>
+          <li>Daily target hours (default 8), default duration and start time, delay between requests, allow weekends.</li>
+          <li><b>Holidays &amp; leave:</b> add single dates or ranges; they are skipped everywhere and shown striped on the calendar.</li>
+          <li><b>Remove saved credentials</b> deletes the token and all saved Jira data from this browser — use it on shared computers.</li>
+        </ul>
+      </div>
+
+      <div class="card" id="h-faq">
+        <h3>13 · Problems &amp; answers</h3>
+        <dl class="faq">
+          <dt>“Could not reach Jira (…)” / 502</dt><dd>JiraTime could not connect to Jira (network, VPN or slow DNS). Press <b>Retry</b> next to the message. The first request after starting can take ~8 s on some office networks.</dd>
+          <dt>“showing saved data · updating…”</dt><dd>The calendar shows the last data saved in this browser while fresh data loads. If loading fails, the error appears in red with a Retry button.</dd>
+          <dt>“Jira rejected the credentials”</dt><dd>The API token is wrong or was revoked. Settings → Change Jira account / token.</dd>
+          <dt>Jira refuses to edit, move or delete a worklog</dt><dd>The period may be locked in Jira/Clockwork or you lack permission; the message from Jira is shown.</dd>
+          <dt>The auto-log did not run</dt><dd>The JiraTime tab was closed or asleep at that time. Open it — missed days are offered. Check the run log on the Automation page.</dd>
+          <dt>NewersWorld says “not connected”</dt><dd>Open NewersWorld with the button on this page and click the bookmark in that tab. Re-create the bookmark if you moved JiraTime to a new address.</dd>
+          <dt>Port 3000 already in use (local)</dt><dd>An older <code>node server.js</code> is still running. Stop it (Ctrl+C in its terminal) and start again.</dd>
+        </dl>
+      </div>
+    </div>
+  </section>
+
   <!-- REPORTS -->
   <section id="view-reports" class="view">
     <div class="card">
@@ -331,5 +541,7 @@
 <script src="wizard.js"></script>
 <script src="nw.js"></script>
 <script src="fields.js"></script>
+<script src="ai.js"></script>
+<script src="help.js"></script>
 </body>
 </html>
