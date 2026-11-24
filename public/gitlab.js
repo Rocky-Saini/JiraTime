@@ -1,7 +1,9 @@
 "use strict";
-/* GitLab workspace — Phase 1: connect, overview dashboard and project explorer (read-only).
-   Works only with the LOCAL JiraTime server (node server.js): it talks to /api/gitlab/* and /gl/api/v4/*.
-   The GitLab token stays on the server (OS keyring or a 0600 file); this page never sees it.
+/* GitLab workspace: connect, overview dashboard, project explorer and the shared API helpers.
+   Two ways to reach GitLab:
+   - local app (node server.js on localhost): /api/gitlab/* + /gl/api/v4/*; the token stays in the server (keyring / 0600 file).
+   - hosted website (Netlify): the browser calls the GitLab API directly (GitLab allows CORS); the token is kept in this
+     browser's localStorage, like the Jira token. Local git (clone into a folder, commit, conflicts) then needs the laptop server.
    Uses globals from app.js ($, esc, toast, openModal, closeModal, JT, pool, sleep, agoText, ymdOf, addDays). */
 
 const GL = {
@@ -18,13 +20,65 @@ const enc = encodeURIComponent;
 let GL_BASE = "";
 const GL_LOCAL_URLS = [localStorage.getItem("jiratime.gl.localUrl") || "http://localhost:3000", "http://127.0.0.1:3000"].filter((v, i, a) => a.indexOf(v) === i);
 const glHosted = () => !["localhost", "127.0.0.1"].includes(location.hostname);
+/** Direct mode = hosted website talking to GitLab from the browser. "laptop" mode uses the JiraTime server on this laptop. */
+const glDirect = () => glHosted() && localStorage.getItem("jiratime.gl.mode") !== "laptop";
+const glCreds = {
+  get() { try { return JSON.parse(localStorage.getItem("jiratime.gl.direct") || "null"); } catch { return null; } },
+  set(c) { localStorage.setItem("jiratime.gl.direct", JSON.stringify(c)); },
+  clear() { localStorage.removeItem("jiratime.gl.direct"); },
+};
+const GL_NET_HINT = "Could not reach GitLab from this browser — is the VPN on? If Chrome asked to allow access to devices on your local network, choose Allow (site settings → Local network access).";
+/** One request straight to GitLab with the user's token (direct mode). Returns the fetch Response. */
+async function glDirectFetch(base, token, path, { signal, method = "GET", body } = {}) {
+  const write = method !== "GET";
+  try {
+    return await fetch(base + "/api/v4" + path, { signal, method, cache: "no-store", headers: { Accept: "application/json", "PRIVATE-TOKEN": token, ...(write ? { "Content-Type": "application/json" } : {}) }, body: write ? JSON.stringify(body || {}) : undefined });
+  } catch (e) { if (e.name === "AbortError") throw e; throw new GlError(GL_NET_HINT, 0); }
+}
+function glDirectError(r, data, write) {
+  const m = data?.message ? (typeof data.message === "string" ? data.message : JSON.stringify(data.message)) : data?.error_description || data?.error || "";
+  if (r.status === 401) return "GitLab rejected the saved token — it expired or was revoked. Replace the token.";
+  if (r.status === 403) return `GitLab refused this${m ? " (" + m + ")" : ""}. ${write ? "You may lack permission in this project, or the token needs the api scope." : "The token needs the read_api scope."}`;
+  return `GitLab ${r.status}${m ? ": " + m : ""}`;
+}
+function glNormUrl(input) {
+  let raw = String(input || "").trim(); if (raw && !/^[a-z]+:\/\//i.test(raw)) raw = "https://" + raw;
+  let u; try { u = new URL(raw); } catch { throw new Error("GitLab URL is not valid (e.g. https://gitlab.company.com)"); }
+  if (u.protocol !== "https:") throw new Error("GitLab URL must start with https://");
+  return u.origin;
+}
+/** Direct mode connect: check the token with GitLab, then keep it in this browser. */
+async function glDirectConnect({ url, username, token }) {
+  url = glNormUrl(url); username = String(username || "").trim().replace(/^@/, ""); token = String(token || "").trim();
+  if (!/^[\x21-\x7e]{10,500}$/.test(token)) throw new Error("Personal Access Token looks wrong (no spaces, at least 10 characters)");
+  const r = await glDirectFetch(url, token, "/user");
+  if (r.status === 401) throw new Error("GitLab rejected the token — it is wrong, expired or revoked");
+  if (r.status === 403) throw new Error("The token is valid but lacks permission. Give it the read_api scope (api for merge requests).");
+  if (!r.ok) throw new Error(`GitLab answered ${r.status} — check the URL`);
+  let user; try { user = await r.json(); } catch { throw new Error("This URL did not return GitLab data — check the address"); }
+  if (!user?.username) throw new Error("This URL did not return a GitLab user — check the address");
+  if (![user.username, user.email, user.public_email].filter(Boolean).some((x) => x.toLowerCase() === username.toLowerCase())) throw new Error(`This token belongs to @${user.username}, not "${username}"`);
+  let scopes = null, expiresAt = null;
+  try { const s = await glDirectFetch(url, token, "/personal_access_tokens/self"); if (s.ok) { const j = await s.json(); scopes = j.scopes || null; expiresAt = j.expires_at || null; } } catch { /* optional */ }
+  const c = { url, username: user.username, token, user: { id: user.id, username: user.username, name: user.name, email: user.email || user.public_email || "" }, scopes, expiresAt, connectedAt: new Date().toISOString() };
+  glCreds.set(c);
+  return glDirectStatus();
+}
+function glDirectStatus() {
+  const c = glCreds.get();
+  if (!c) return { available: true, direct: true, api: GL_SERVER_API, connected: false };
+  const { token, ...pub } = c; void token;
+  return { available: true, direct: true, api: GL_SERVER_API, connected: true, store: "browser", ...pub };
+}
 
 class GlError extends Error { constructor(m, s) { super(m); this.status = s; } }
 const glNs = () => (GL.st?.connected ? `${GL.st.url}|${GL.st.username}`.toLowerCase() : "");
 const glCache = {
   get(n) { try { const v = JSON.parse(localStorage.getItem("jiratime.gl." + n) || "null"); return v && v.ns === glNs() ? v : null; } catch { return null; } },
   set(n, data) { if (!glNs()) return; try { localStorage.setItem("jiratime.gl." + n, JSON.stringify({ ns: glNs(), at: Date.now(), data })); } catch { /* storage full: optional */ } },
-  clear() { Object.keys(localStorage).filter((k) => k.startsWith("jiratime.gl.") && !k.endsWith(".last")).forEach((k) => localStorage.removeItem(k)); },
+  clear() {   // only the cached GitLab data (entries written by set()), never the login, mode or settings
+    Object.keys(localStorage).filter((k) => k.startsWith("jiratime.gl.")).forEach((k) => { try { const v = JSON.parse(localStorage.getItem(k)); if (v && typeof v === "object" && "ns" in v && "data" in v) localStorage.removeItem(k); } catch { /* not cache */ } });
+  },
 };
 /** Only links that point into the connected GitLab are rendered as links. */
 const glUrl = (u) => (typeof u === "string" && GL.st?.url && (u === GL.st.url || u.startsWith(GL.st.url + "/")) ? u : "");
@@ -36,6 +90,20 @@ const initials = (n) => String(n || "?").split(/\s+/).map((x) => x[0]).join("").
 // ================= API =================
 async function glApi(path, { signal, method = "GET", body } = {}) {
   const write = method !== "GET";
+  if (glDirect()) {
+    const c = glCreds.get(); if (!c) throw new GlError("GitLab is not connected", 412);
+    for (let attempt = 1; ; attempt++) {
+      const r = await glDirectFetch(c.url, c.token, path, { signal, method, body });
+      if (r.status === 429 && attempt <= 2) { await sleep(Math.min(30, +r.headers.get("retry-after") || 3) * 1000); continue; }
+      if (!write && [502, 503, 504].includes(r.status) && attempt <= 2) { await sleep(attempt * 1200); continue; }
+      const trace = /\/trace$/.test(path.split("?")[0]);
+      let data = null;
+      if (trace && r.ok) data = { trace: (await r.text()).slice(-400_000) }; else { try { data = await r.json(); } catch { /* empty */ } }
+      if (!r.ok) { const msg = glDirectError(r, data, write); if (r.status === 401) { GL.tokenBad = msg; glHead(); glPill(); } throw new GlError(msg, r.status); }
+      const total = r.headers.get("x-total");
+      return { data, total: total != null && total !== "" ? +total : null, next: r.headers.get("x-next-page") || "" };
+    }
+  }
   for (let attempt = 1; ; attempt++) {
     let r;
     try { r = await fetch(GL_BASE + "/gl/api/v4" + path, { signal, method, headers: { Accept: "application/json", ...(write ? { "Content-Type": "application/json" } : {}) }, body: write ? JSON.stringify(body || {}) : undefined }); }
@@ -66,6 +134,7 @@ async function glAll(path, maxPages = 10, signal) {
 }
 /** Local git layer (/api/git/*). */
 async function gitApi(p, body, { method } = {}) {
+  if (glDirect()) throw new GlError("This needs JiraTime running on your laptop (node server.js) — the website cannot run git.", 0);
   let r;
   try { r = await fetch(GL_BASE + "/api/git" + p, body !== undefined || method === "POST" ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) } : {}); }
   catch { throw new GlError("The local JiraTime server is not reachable — is node server.js running?", 0); }
@@ -82,6 +151,7 @@ async function glStatusAt(base) {
 }
 /** Same server first; on the hosted website, the JiraTime server on this laptop. */
 async function glStatus() {
+  if (glDirect()) { GL_BASE = ""; return glDirectStatus(); }
   if (!glHosted()) { GL_BASE = ""; return (await glStatusAt("")) || { available: false }; }
   for (const base of GL_LOCAL_URLS) { const j = await glStatusAt(base); if (j) { GL_BASE = base; return { ...j, bridged: true }; } }
   GL_BASE = ""; return { available: false, hosted: true };
@@ -263,7 +333,7 @@ function glLocalOnly() {
       <li>Press <b>Try again</b>. If Chrome asks to let this site access devices on your local network, choose <b>Allow</b>.</li>
     </ol>
     <div class="row-actions"><button class="primary" data-glact="retrylocal" style="width:auto;margin:0">⟳ Try again</button><span class="muted tiny">Looking for the server at ${GL_LOCAL_URLS.map(esc).join(" / ")}</span></div>
-    <p class="muted tiny">Your Jira features work without it. Or open <b>http://localhost:3000</b> directly.</p></div>`;
+    <p class="muted tiny">Your Jira features work without it. ${glHosted() ? '<button class="small" data-glact="usebrowser">← Use GitLab from this browser instead (no laptop server)</button>' : ""}</p></div>`;
 }
 
 function glConnectForm() {
@@ -290,7 +360,7 @@ function glConnectForm() {
         <li><code>read_api</code> + <code>read_repository</code> is enough if you only want to look and clone; you can replace the token later.</li>
         <li>Give it an expiry date as your company policy requires.</li>
       </ul>
-      <p class="muted tiny">The token is checked with GitLab and then kept only on this laptop (OS keyring, or a file in <code>~/.config/jiratime</code> that only your user can read). It is never stored in the browser or sent anywhere except your GitLab.</p>
+      <p class="muted tiny">${glDirect() ? "The token is checked with GitLab and saved in this browser only (like your Jira token). JiraTime's website never receives it — your browser talks to your GitLab directly, so the VPN must be on. If Chrome asks to allow access to your local network, choose <b>Allow</b>." : "The token is checked with GitLab and then kept only on this laptop (OS keyring, or a file in <code>~/.config/jiratime</code> that only your user can read). It is never stored in the browser or sent anywhere except your GitLab."}</p>
     </div></div>`;
 }
 const glTokenLink = (url) => { try { return new URL(url.includes("://") ? url : "https://" + url).origin + "/-/user_settings/personal_access_tokens?name=JiraTime&scopes=api,write_repository"; } catch { return "#"; } };
@@ -306,9 +376,13 @@ function glWireConnect() {
     if (!body.url || !body.username || !body.token) { err.textContent = "Fill in URL, username and token"; return; }
     go.disabled = true; go.textContent = "Connecting…";
     try {
-      const r = await fetch(GL_BASE + "/api/gitlab/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j.error || `Failed (${r.status})`);
+      let j;
+      if (glDirect()) j = await glDirectConnect(body);
+      else {
+        const r = await fetch(GL_BASE + "/api/gitlab/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || `Failed (${r.status})`);
+      }
       $("#glTok").value = "";
       const changed = glNs() !== `${j.url}|${j.username}`.toLowerCase();
       GL.st = j; GL.view = null; GL.tokenBad = "";
@@ -332,7 +406,7 @@ function glHead() {
   el.innerHTML = `<div class="gl-head card">
     <div class="gl-avatar">${esc(initials(u.name || s.username))}</div>
     <div class="gl-who"><b>${esc(u.name || s.username)}</b> <span class="muted">@${esc(s.username)}</span>
-      <div class="muted tiny">${glLink(s.url, esc(host))} · ${scopes}${days != null ? ` · <span class="${days <= 14 ? "st-failed" : ""}">token ${days < 0 ? "expired" : `expires in ${days} day${days === 1 ? "" : "s"}`}</span>` : ""} · stored in ${s.store === "keyring" ? "OS keyring" : "a private file on this laptop"}</div></div>
+      <div class="muted tiny">${glLink(s.url, esc(host))} · ${scopes}${days != null ? ` · <span class="${days <= 14 ? "st-failed" : ""}">token ${days < 0 ? "expired" : `expires in ${days} day${days === 1 ? "" : "s"}`}</span>` : ""} · stored in ${s.store === "keyring" ? "OS keyring" : s.store === "browser" ? "this browser" : "a private file on this laptop"}</div></div>
     <div class="grow"></div>
     <span id="glSync" class="muted tiny"></span>
     <button class="small" data-glact="refresh">⟳ Refresh</button>
@@ -468,7 +542,7 @@ function glOpenProject(id, tab = "info") {
   GL.opened[p.id] = Date.now(); glCache.set("opened", GL.opened);
   openModal(`<div class="gl-det" data-gldet="${p.id}">
     <div class="gl-det-head"><div><h3>${esc(p.name)}</h3><div class="muted tiny">${esc(p.path)}</div></div><div class="grow"></div>
-      ${window.GLL ? (window.GLL.localFor(p) ? `<button class="small" data-glact="openlocal:${p.id}">📂 Open local repo</button>` : `<button class="small primary-s" data-glact="clone:${p.id}">⬇ Clone</button>`) : ""}
+      ${window.GLL ? (!glDirect() && window.GLL.localFor(p) ? `<button class="small" data-glact="openlocal:${p.id}">📂 Open local repo</button>` : `<button class="small primary-s" data-glact="clone:${p.id}">⬇ Clone</button>`) : ""}
       ${window.GLM ? `<button class="small" data-glact="newmr:${p.id}">＋ Merge request</button>` : ""}
       ${glLink(p.web, "Open in GitLab ↗", "small gl-ext")}</div>
     <div class="gl-sub">${GL_DTABS.map(([t, l]) => `<button class="gl-tab ${t === tab ? "on" : ""}" data-gldtab="${t}">${l}</button>`).join("")}</div>
@@ -563,6 +637,8 @@ function glTogglePin(id) {
 /** Extra actions registered by other files: data-glact="name:arg". */
 const GL_ACTIONS = {};
 async function glAction(act) {
+  if (act === "uselaptop") { localStorage.setItem("jiratime.gl.mode", "laptop"); return glAction("retrylocal"); }
+  if (act === "usebrowser") { localStorage.removeItem("jiratime.gl.mode"); GL.st = await glStatus(); glResetData(); glPill(); glRender(); if (GL.st.connected) glRefresh(false); return; }
   if (act === "retrylocal") { GL.st = await glStatus(); glPill(); if (GL.st.connected) glLoadLocal(); glRender(); if (GL.st.connected) glRefresh(false); else if (!GL.st.available) toast("JiraTime server not found on this laptop — is node server.js running?"); return; }
   if (act === "refresh") { GL.tokenBad = ""; glHead(); glPill(); return glRefresh(true); }
   if (act === "replace") { GL.view = "connect"; return glRender(); }
@@ -570,7 +646,8 @@ async function glAction(act) {
   if (act === "closedet") { GL.abort?.abort(); return closeModal(); }
   if (act === "disconnect") {
     if (!confirm("Disconnect GitLab? The token is removed from this laptop and the saved GitLab data is cleared.")) return;
-    await fetch(GL_BASE + "/api/gitlab/disconnect", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
+    if (glDirect()) glCreds.clear();
+    else await fetch(GL_BASE + "/api/gitlab/disconnect", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
     glResetData(); GL.st = await glStatus(); GL.view = null; toast("GitLab disconnected"); glPill(); return glRender();
   }
   if (act.startsWith("tab:")) { GL.tab = act.slice(4); return glRender(); }

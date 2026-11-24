@@ -71,7 +71,7 @@ function glpDraw() {
       <div class="muted tiny">${esc(glmProj(c.pid)?.path || "")} · ⎇ ${esc(p.ref)} · <code class="sha">${esc(String(p.sha).slice(0, 8))}</code> · ${esc(p.user?.name || "")} · started ${esc(ago(p.started_at || p.created_at))}${p.duration ? ` · took ${glpDur(p.duration)}` : ""}${p.source ? ` · ${esc(p.source)}` : ""}</div></div>
       <div class="grow"></div>${failed ? `<button class="small" data-glact="glpretrypipe">↻ Retry ${failed} failed job${failed === 1 ? "" : "s"}</button>` : ""}${glLink(p.web_url, "Open in GitLab ↗", "small gl-ext")}</div>
     <div class="glp-stages">${stages.map((s) => `<div class="glp-stage"><div class="glp-sn">${esc(s.name)}</div>${s.jobs.map((j) => `<button class="glp-job st-${esc(j.status)} ${c.job === j.id ? "on" : ""}" data-glact="glpjob:${j.id}" title="${esc(j.status)}">
-        <span class="glp-ji">${GLP_ICON[j.status] || "○"}</span><span class="glp-jn">${esc(j.name)}</span><span class="muted tiny">${glpDur(j.duration)}</span>${j.allow_failure && j.status === "failed" ? '<span class="b diff">allowed</span>' : ""}</button>`).join("")}</div>`).join("") || '<p class="muted">No jobs.</p>'}</div>
+        <span class="glp-ji">${GLP_ICON[j.status] || "○"}</span><span class="glp-jn">${esc(j.name)}</span><span class="muted tiny">${glpDur(j.duration)}</span>${j.allow_failure && j.status === "failed" ? '<span class="b diff">allowed</span>' : ""}</button>`).join("")}</div>`).join("") || (p.source === "external" ? '<p class="muted">This is an external pipeline (run by another CI system, e.g. Jenkins / DevSecOps) — GitLab has no jobs or logs for it. Use “Open in GitLab” for the link to that system.</p>' : '<p class="muted">No jobs.</p>')}</div>
     <div id="glpLog"></div>
     <div class="foot"><button data-glact="closedet">Close</button></div></div>`);
   if (c.job) glpJob(c.job);
@@ -213,8 +213,28 @@ function gljDraw() {
         <h4 class="tiny muted">On this laptop</h4>${r.local == null ? wait : `<table class="gl-tbl">${r.local.map(({ r: repo, c }) => `<tr data-glact="gljlocal:${repo.id}|${c.sha}"><td><code class="sha">${esc(c.sha.slice(0, 8))}</code></td><td>${GLD.jira(c.title)}<small class="muted">${esc(repo.name)} · ${esc(c.author)} · ${esc(ago(c.at))}</small></td></tr>`).join("") || '<tr><td class="muted tiny">None in your local repositories.</td></tr>'}</table>`}</div>
     </div>`;
 }
+/** Website mode: create the branch on GitLab through the API. */
+function gljBranchApi(name) {
+  const recent = glRanked().slice(0, 60).map((x) => x.p);
+  openModal(`<div class="gl-det" data-gldet="0"><h3>⎇ Start a branch for ${esc(GLJ.res.key)}</h3><p class="muted tiny">The branch is created on GitLab. Pull it in your editor afterwards.</p><div class="form">
+      <label>Project <select id="gljP">${recent.map((p) => `<option value="${p.id}">${esc(p.path)}</option>`).join("")}</select></label>
+      <label>Branch name <input id="gljN" value="${esc(name)}"></label>
+      <label>Start from <input id="gljF" value="${esc(recent[0]?.branch || "master")}" placeholder="branch / tag / SHA"></label></div>
+    <div class="foot"><button data-glact="closedet">Cancel</button><button class="primary" id="gljGo">Create branch</button></div></div>`);
+  $("#gljP").onchange = (e) => { $("#gljF").value = glmProj(e.target.value)?.branch || "master"; };
+  $("#gljGo").onclick = async () => {
+    const pid = $("#gljP").value, branch = $("#gljN").value.trim(), ref = $("#gljF").value.trim(); if (!branch || !ref) return;
+    $("#gljGo").disabled = true;
+    try { await glApi(`/projects/${pid}/repository/branches?branch=${enc(branch)}&ref=${enc(ref)}`, { method: "POST" }); toast(`Created ${branch} on GitLab`); closeModal(); gljFind(GLJ.res.key); }
+    catch (e) { toast(e.message); $("#gljGo").disabled = false; }
+  };
+}
 function gljBranchDlg() {
   const r = GLJ.res, repos = window.GLL?.state.repos || [];
+  if (glDirect()) {
+    const slug0 = String(r.issue?.fields?.summary || "work").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+    return gljBranchApi(`${/bug|defect/i.test(r.issue?.fields?.issuetype?.name || "") ? "bugfix" : "feature"}/${r.key}-${slug0}`);
+  }
   if (!repos.length) { toast("Clone or add a repository first (Local repos)"); return; }
   const slug = String(r.issue?.fields?.summary || "work").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
   const type = /bug|defect/i.test(r.issue?.fields?.issuetype?.name || "") ? "bugfix" : "feature";

@@ -288,3 +288,8 @@ button.primary-s .gl-tc,button.primary .gl-tc{background:rgba(255,255,255,.25);c
 .gl-acc.ok{color:var(--ok);background:var(--okbg);border-color:transparent}.gl-acc.no{color:var(--bad);background:var(--badbg);border-color:transparent}.gl-acc.maybe{color:var(--warn);background:var(--warnbg);border-color:transparent}
 .gl-role{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;background:rgba(59,130,246,.15);color:var(--sel)}
 .gl-old{border:1px solid var(--bad);background:var(--badbg)}
+/* website mode */
+.gll-direct{text-align:left}.gll-direct h3{text-align:center}.gll-direct>p{text-align:center;max-width:680px;margin:0 auto 14px}
+.gll-dopts{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.gll-dopts .card{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+a.gll-big{display:flex;flex-direction:column;gap:2px;padding:12px 14px;border:1px solid var(--bd);border-radius:12px;color:var(--tx);text-decoration:none;background:var(--card)}
+a.gll-big:hover{border-color:var(--gl);box-shadow:var(--sh)}

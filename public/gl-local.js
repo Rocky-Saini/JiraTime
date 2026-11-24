@@ -116,8 +116,45 @@ async function gllRunClone(p, dest, name, proto) {
 }
 
 // ================= Local repos tab =================
+/** Website mode: no git on this page. Clone through VS Code / git commands, or download a ZIP through the API. */
+function gllDirectTab() {
+  $("#glBody").innerHTML = `<div class="card gll-hero gll-direct"><h3>⌂ Local repositories</h3>
+    <p>Working with folders on your laptop (clone into a folder, stage, commit, push, resolve conflicts) needs the <code>git</code> program, which a website cannot run.</p>
+    <div class="gll-dopts">
+      <div class="card"><b>⬇ Clone a project</b><p class="muted tiny">Open <b>Projects</b>, click a project, press <b>⬇ Clone</b>: clone with VS Code (it asks for the folder), copy the git command, or download a ZIP.</p><button class="small primary-s" data-glact="tab:projects">Go to Projects</button></div>
+      <div class="card"><b>🔀 Merge requests, reviews, pipelines</b><p class="muted tiny">Work fully here in the browser — no setup needed.</p><button class="small" data-glact="tab:mrs">Go to Merge requests</button></div>
+      <div class="card"><b>💻 Full local git in JiraTime</b><p class="muted tiny">Optional: run <code>node server.js</code> from the JiraTime folder on your laptop, then switch here.</p><button class="small" data-glact="uselaptop">Use JiraTime on this laptop</button></div>
+    </div></div>`;
+}
+/** Clone dialog for the website: VS Code clone (folder picker in VS Code), git commands, ZIP download. */
+function gllCloneDirect(p) {
+  const vs = (u) => "vscode://vscode.git/clone?url=" + encodeURIComponent(u);
+  const cmd = (u) => `git clone ${u}`;
+  openModal(`<div class="gl-det" data-gldet="${p.id}"><h3>⬇ Clone ${esc(p.name)}</h3><p class="muted tiny">${esc(p.path)}</p>
+    <div class="gll-opts">
+      <a class="gll-big" href="${esc(vs(p.http))}"><b>Clone in VS Code</b><span class="muted tiny">VS Code opens, asks which folder to clone into, and opens the project (HTTPS — use your GitLab username + token as password if asked)</span></a>
+      ${p.ssh ? `<a class="gll-big" href="${esc(vs(p.ssh))}"><b>Clone in VS Code with SSH</b><span class="muted tiny">uses your SSH key</span></a>` : ""}
+    </div>
+    <h4>Or with a terminal</h4>
+    <div class="gl-clone"><span class="muted tiny">HTTPS</span><code>${esc(cmd(p.http))}</code><button class="small" data-glcopy="${esc(cmd(p.http))}">Copy</button></div>
+    ${p.ssh ? `<div class="gl-clone"><span class="muted tiny">SSH</span><code>${esc(cmd(p.ssh))}</code><button class="small" data-glcopy="${esc(cmd(p.ssh))}">Copy</button></div>` : ""}
+    <h4>Or just the files</h4>
+    <div class="row-actions"><input id="gllZr" value="${esc(p.branch || "")}" placeholder="branch / tag" style="width:220px"><button class="small" id="gllZip">⬇ Download ZIP</button><span id="gllZs" class="muted tiny"></span></div>
+    <div class="foot"><button data-glact="closedet" class="primary">Close</button></div></div>`);
+  $("#gllZip").onclick = async () => {
+    const ref = $("#gllZr").value.trim(), c = glCreds.get(), st = $("#gllZs"); st.innerHTML = '<span class="spin"></span> downloading…';
+    try {
+      const r = await glDirectFetch(c.url, c.token, `/projects/${p.id}/repository/archive.zip${ref ? `?sha=${enc(ref)}` : ""}`);
+      if (!r.ok) throw new Error(r.status === 404 ? "Branch / tag not found" : `GitLab ${r.status}`);
+      const a = document.createElement("a"); a.href = URL.createObjectURL(await r.blob()); a.download = `${p.path.split("/").pop()}-${(ref || "default").replace(/[^\w.-]+/g, "_")}.zip`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      st.textContent = "✓ saved to your Downloads";
+    } catch (e) { st.textContent = e.message; }
+  };
+}
+
 function gllRenderTab() {
   const body = $("#glBody"); if (!body) return;
+  if (glDirect()) return gllDirectTab();
   body.innerHTML = `<div class="gll-wrap"><aside class="gll-side card"><div class="gll-side-h"><b>Repositories on this laptop</b><span class="grow"></span>
       <button class="small ghost" title="Refresh" data-glact="gllrefresh">⟳</button></div>
       <div class="gll-side-a"><button class="small primary-s" data-glact="tab:projects" title="Pick a project, then Clone">⬇ Clone from GitLab</button><button class="small" data-glact="glladd">＋ Add folder</button><button class="small" data-glact="gllscan">🔎 Scan</button></div>
@@ -448,7 +485,7 @@ async function gllConflicts(st) {
 
 // ================= actions =================
 Object.assign(GL_ACTIONS, {
-  clone: (pid) => { const p = GL.projects.find((x) => x.id === +pid); if (p) gllClone(p); },
+  clone: (pid) => { const p = GL.projects.find((x) => x.id === +pid); if (p) (glDirect() ? gllCloneDirect(p) : gllClone(p)); },
   openlocal: async (pid) => { await gllLoad(); const r = gllLocalFor(GL.projects.find((x) => x.id === +pid)); if (r) gllOpenRepo(r.id); },
   gllopen: (arg) => { const [id, what] = arg.split("|"); gllDo(what === "code" ? "Open in VS Code" : "Open folder", () => gitApi("/open", { repo: id, what }), { quiet: true }); },
   gllrefresh: () => { GLLS.st = {}; gllRenderTab(); },
@@ -551,6 +588,6 @@ document.addEventListener("click", (e) => {
 document.addEventListener("input", (e) => { const t = e.target.closest?.("[data-gllce]"); if (t) { const fl = GLLS.cf.files[GLLS.cfIdx]; GLLS.cfChoice[fl.path][+t.dataset.gllce] = { take: "edit", text: t.value }; } });
 // GL actions inside modals (folder picker, clone result, pull options…) go through gitlab.js's modal listener.
 
-glAddTab({ id: "local", icon: "⌂", label: "Local repos", render: () => gllRenderTab(), refresh: () => { gllFillList(); }, count: () => (GLLS.repos ? String(GLLS.repos.length) : "") }, "projects");
+glAddTab({ id: "local", icon: "⌂", label: "Local repos", render: () => gllRenderTab(), refresh: () => { if (!glDirect()) gllFillList(); }, count: () => (GLLS.repos ? String(GLLS.repos.length) : "") }, "projects");
 window.GLL = { localFor: gllLocalFor, load: gllLoad, clone: gllClone, open: gllOpenRepo, pickFolder: gllPickFolder, parseConflicts: gllParseConflicts, join: gllJoin, graph: gllGraph, get state() { return GLLS; } };
-JT.on("view", (v) => { if (v === "gitlab") gllLoad().then(() => { if (GL.tab === "overview") glRerender(); }).catch(() => {}); });
+JT.on("view", (v) => { if (v === "gitlab" && !glDirect()) gllLoad().then(() => { if (GL.tab === "overview") glRerender(); }).catch(() => {}); });
