@@ -145,10 +145,29 @@ async function glAll(path, maxPages = 10, signal) {
   return out;
 }
 /** Local git layer (/api/git/*). */
+/** Website mode: base URL of the JiraTime helper on this laptop (git runs there), or "" when not found. */
+let GL_GIT = "";
+const GL_INSTALL = "curl -fsSL https://jiratime-by-rocky.netlify.app/install.sh | bash";
+/** Look for the laptop helper and give it the same GitLab login as this browser (it needs it for clone / push). */
+async function glHelperConnect() {
+  GL_GIT = ""; GL.helper = { found: false };
+  let st = null;
+  for (const base of GL_LOCAL_URLS) { st = await glStatusAt(base); if (st) { GL_GIT = base; break; } }
+  if (!st) return GL.helper;
+  GL.helper = { found: true, old: st.api !== GL_SERVER_API };
+  if (GL.helper.old) { GL_GIT = ""; return GL.helper; }
+  const c = glCreds.get();
+  if (c && (!st.connected || st.url !== c.url || String(st.username).toLowerCase() !== c.username.toLowerCase())) {
+    const r = await fetch(GL_GIT + "/api/gitlab/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: c.url, username: c.username, token: c.token }) }).catch(() => null);
+    if (!r || !r.ok) { GL.helper.err = (await r?.json().catch(() => ({})))?.error || "could not pass the GitLab login to the helper"; }
+  }
+  localStorage.setItem("jiratime.gl.helper", "1");
+  return GL.helper;
+}
 async function gitApi(p, body, { method } = {}) {
-  if (glDirect()) throw new GlError("This needs JiraTime running on your laptop (node server.js) — the website cannot run git.", 0);
+  if (glDirect() && !GL_GIT) throw new GlError("Local git needs the JiraTime helper on this laptop — set it up once in GitLab → Local repos.", 0);
   let r;
-  try { r = await fetch(GL_BASE + "/api/git" + p, body !== undefined || method === "POST" ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) } : {}); }
+  try { r = await fetch((glDirect() ? GL_GIT : GL_BASE) + "/api/git" + p, body !== undefined || method === "POST" ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) } : {}); }
   catch { throw new GlError("The local JiraTime server is not reachable — is node server.js running?", 0); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new GlError(r.status === 404 && (!j.error || j.error === "Not found") ? "The JiraTime server on this laptop is an old version — stop it (Ctrl+C) and start node server.js again" : j.error || `Failed (${r.status})`, r.status);
@@ -163,7 +182,7 @@ async function glStatusAt(base) {
 }
 /** Same server first; on the hosted website, the JiraTime server on this laptop. */
 async function glStatus() {
-  if (glDirect()) { GL_BASE = ""; return glDirectStatus(); }
+  if (glDirect()) { GL_BASE = ""; if (localStorage.getItem("jiratime.gl.helper") === "1" && !GL_GIT) glHelperConnect().then(() => { if (GL_GIT && GL.st?.connected) { window.GLL?.load(true).catch(() => {}); if (GL.tab === "local") glRender(); } }).catch(() => {}); return glDirectStatus(); }
   if (!glHosted()) { GL_BASE = ""; return (await glStatusAt("")) || { available: false }; }
   for (const base of GL_LOCAL_URLS) { const j = await glStatusAt(base); if (j) { GL_BASE = base; return { ...j, bridged: true }; } }
   GL_BASE = ""; return { available: false, hosted: true };
@@ -556,7 +575,7 @@ function glOpenProject(id, tab = "info") {
   GL.opened[p.id] = Date.now(); glCache.set("opened", GL.opened);
   openModal(`<div class="gl-det" data-gldet="${p.id}">
     <div class="gl-det-head"><div><h3>${esc(p.name)}</h3><div class="muted tiny">${esc(p.path)}</div></div><div class="grow"></div>
-      ${window.GLL ? (!glDirect() && window.GLL.localFor(p) ? `<button class="small" data-glact="openlocal:${p.id}">📂 Open local repo</button>` : `<button class="small primary-s" data-glact="clone:${p.id}">⬇ Clone</button>`) : ""}
+      ${window.GLL ? ((!glDirect() || GL_GIT) && window.GLL.localFor(p) ? `<button class="small" data-glact="openlocal:${p.id}">📂 Open local repo</button>` : `<button class="small primary-s" data-glact="clone:${p.id}">⬇ Clone</button>`) : ""}
       ${window.GLM ? `<button class="small" data-glact="newmr:${p.id}">＋ Merge request</button>` : ""}
       ${glLink(p.web, "Open in GitLab ↗", "small gl-ext")}</div>
     <div class="gl-sub">${GL_DTABS.map(([t, l]) => `<button class="gl-tab ${t === tab ? "on" : ""}" data-gldtab="${t}">${l}</button>`).join("")}</div>
@@ -651,6 +670,7 @@ function glTogglePin(id) {
 /** Extra actions registered by other files: data-glact="name:arg". */
 const GL_ACTIONS = {};
 async function glAction(act) {
+  if (act === "helperconnect") { toast("Looking for the JiraTime helper…"); const h = await glHelperConnect(); toast(h.found ? (h.old ? "The helper is an old version — run the setup command again to update it" : h.err ? "Helper found, but: " + h.err : "Laptop connected ✓") : "Helper not found on this laptop — run the setup command, then try again"); return glRender(); }
   if (act === "uselaptop") { localStorage.setItem("jiratime.gl.mode", "laptop"); return glAction("retrylocal"); }
   if (act === "usebrowser") { localStorage.removeItem("jiratime.gl.mode"); GL.st = await glStatus(); glResetData(); glPill(); glRender(); if (GL.st.connected) glRefresh(false); return; }
   if (act === "retrylocal") { GL.st = await glStatus(); glPill(); if (GL.st.connected) glLoadLocal(); glRender(); if (GL.st.connected) glRefresh(false); else if (!GL.st.available) toast("JiraTime server not found on this laptop — is node server.js running?"); return; }
