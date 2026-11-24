@@ -9,6 +9,11 @@ const gitlab = require("./lib/gitlab");
 const localgit = require("./lib/localgit");
 
 const PORT = +process.env.PORT || 3000;
+// Websites that may use the GitLab / git part of this local server from the browser (the hosted JiraTime).
+// Only these origins get CORS access; every other site is still refused.
+const BRIDGE_ORIGINS = (process.env.JIRATIME_ORIGINS || "https://jiratime-by-rocky.netlify.app").split(",").map((x) => x.trim().replace(/\/+$/, "")).filter(Boolean);
+const EXPOSE = "x-total, x-total-pages, x-next-page, x-page, x-per-page, retry-after, link";
+const corsFor = (origin) => ({ "Access-Control-Allow-Origin": origin, Vary: "Origin", "Access-Control-Expose-Headers": EXPOSE });
 const PUBLIC = path.join(__dirname, "public");
 const TYPES = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript" };
 
@@ -19,7 +24,7 @@ function readBody(req, max = 100_000) {
   });
 }
 function send(res, code, body, type = "application/json", extra = {}) {
-  if (code === 204) { res.writeHead(204, { "Cache-Control": "no-store" }); return res.end(); }
+  if (code === 204) { res.writeHead(204, { ...extra, "Cache-Control": "no-store" }); return res.end(); }
   res.writeHead(code, { ...extra, "Content-Type": type, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
   res.end(body);
 }
@@ -34,20 +39,29 @@ http.createServer(async (req, res) => {
       const r = await proxy({ method: req.method, path: url.pathname.slice(5), query: url.search.slice(1), body, headers: req.headers });
       return send(res, r.status, r.body);
     }
+    const local = url.pathname.startsWith("/api/git/") || url.pathname.startsWith("/api/gitlab/") || url.pathname.startsWith("/gl/");
+    const origin = req.headers.origin, bridge = local && !!origin && BRIDGE_ORIGINS.includes(origin);
+    let cors = {};
+    if (bridge) {
+      cors = corsFor(origin);
+      if (req.method === "OPTIONS") return send(res, 204, "", "", { ...cors, "Access-Control-Allow-Methods": "GET, POST, PUT", "Access-Control-Allow-Headers": "Content-Type, Accept",
+        "Access-Control-Allow-Private-Network": "true", "Access-Control-Max-Age": "600" });
+      req.headers["sec-fetch-site"] = "same-origin";          // trusted hosted JiraTime: treat like this page
+    }
     if (url.pathname.startsWith("/api/git/")) {
       const body = req.method === "POST" ? await readBody(req, 6_000_000) : undefined;
       const r = await localgit.handle({ method: req.method, path: url.pathname, query: url.search.slice(1), body, headers: req.headers });
-      if (r) return send(res, r.status, r.body, "application/json", r.headers);
+      if (r) return send(res, r.status, r.body, "application/json", { ...r.headers, ...cors });
     }
     if (url.pathname.startsWith("/api/gitlab/") || url.pathname.startsWith("/gl/")) {
       const body = ["POST", "PUT"].includes(req.method) ? await readBody(req, 250_000) : undefined;
       const r = await gitlab.handle({ method: req.method, path: url.pathname, query: url.search.slice(1), body, headers: req.headers });
-      if (r) return send(res, r.status, r.body, "application/json", r.headers);
+      if (r) return send(res, r.status, r.body, "application/json", { ...r.headers, ...cors });
     }
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
     const file = path.join(PUBLIC, name);
     if (req.method === "GET" && file.startsWith(PUBLIC + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile())
       return send(res, 200, fs.readFileSync(file), (TYPES[path.extname(file)] || "application/octet-stream") + "; charset=utf-8");
-    send(res, 404, '{"error":"Not found"}');
+    send(res, 404, '{"error":"Not found"}', "application/json", cors);
   } catch (e) { send(res, 502, JSON.stringify({ errorMessages: ["Server error: " + e.message] })); }
 }).listen(PORT, "127.0.0.1", () => console.log(`JiraTime running at http://localhost:${PORT}`));

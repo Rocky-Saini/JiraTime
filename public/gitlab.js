@@ -13,6 +13,11 @@ const GL = {
 const GL_PIPE = { success: "good", failed: "low", running: "high", pending: "noest", created: "noest", preparing: "noest", waiting_for_resource: "noest",
   canceled: "noest", skipped: "noest", manual: "over", scheduled: "noest" };
 const enc = encodeURIComponent;
+/** "" when this page comes from the local JiraTime server; "http://localhost:3000" when it is the hosted website
+    talking to the JiraTime server running on this laptop. */
+let GL_BASE = "";
+const GL_LOCAL_URLS = [localStorage.getItem("jiratime.gl.localUrl") || "http://localhost:3000", "http://127.0.0.1:3000"].filter((v, i, a) => a.indexOf(v) === i);
+const glHosted = () => !["localhost", "127.0.0.1"].includes(location.hostname);
 
 class GlError extends Error { constructor(m, s) { super(m); this.status = s; } }
 const glNs = () => (GL.st?.connected ? `${GL.st.url}|${GL.st.username}`.toLowerCase() : "");
@@ -33,7 +38,7 @@ async function glApi(path, { signal, method = "GET", body } = {}) {
   const write = method !== "GET";
   for (let attempt = 1; ; attempt++) {
     let r;
-    try { r = await fetch("/gl/api/v4" + path, { signal, method, headers: { Accept: "application/json", ...(write ? { "Content-Type": "application/json" } : {}) }, body: write ? JSON.stringify(body || {}) : undefined }); }
+    try { r = await fetch(GL_BASE + "/gl/api/v4" + path, { signal, method, headers: { Accept: "application/json", ...(write ? { "Content-Type": "application/json" } : {}) }, body: write ? JSON.stringify(body || {}) : undefined }); }
     catch (e) { if (e.name === "AbortError") throw e; throw new GlError("The local JiraTime server is not reachable — is node server.js running?", 0); }
     if (r.status === 429 && attempt <= 2) { await sleep(Math.min(30, +r.headers.get("retry-after") || 3) * 1000); continue; }   // GitLab rate limit
     if (!write && [502, 503, 504].includes(r.status) && attempt <= 2) { await sleep(attempt * 1200); continue; }               // never repeat a change
@@ -62,18 +67,24 @@ async function glAll(path, maxPages = 10, signal) {
 /** Local git layer (/api/git/*). */
 async function gitApi(p, body, { method } = {}) {
   let r;
-  try { r = await fetch("/api/git" + p, body !== undefined || method === "POST" ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) } : {}); }
+  try { r = await fetch(GL_BASE + "/api/git" + p, body !== undefined || method === "POST" ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) } : {}); }
   catch { throw new GlError("The local JiraTime server is not reachable — is node server.js running?", 0); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new GlError(r.status === 404 && (!j.error || j.error === "Not found") ? "The JiraTime server on this laptop is an old version — stop it (Ctrl+C) and start node server.js again" : j.error || `Failed (${r.status})`, r.status);
   return j;
 }
-async function glStatus() {
+async function glStatusAt(base) {
   try {
-    const r = await fetch("/api/gitlab/status", { headers: { Accept: "application/json" } });
-    if (!r.ok || !String(r.headers.get("content-type") || "").includes("json")) return { available: false };
-    return await r.json();
-  } catch { return { available: false }; }
+    const r = await fetch(base + "/api/gitlab/status", { headers: { Accept: "application/json" }, cache: "no-store" });
+    if (!r.ok || !String(r.headers.get("content-type") || "").includes("json")) return null;
+    const j = await r.json(); return j && j.available ? j : null;
+  } catch { return null; }
+}
+/** Same server first; on the hosted website, the JiraTime server on this laptop. */
+async function glStatus() {
+  if (!glHosted()) { GL_BASE = ""; return (await glStatusAt("")) || { available: false }; }
+  for (const base of GL_LOCAL_URLS) { const j = await glStatusAt(base); if (j) { GL_BASE = base; return { ...j, bridged: true }; } }
+  GL_BASE = ""; return { available: false, hosted: true };
 }
 
 // ================= data =================
@@ -244,10 +255,15 @@ function glAddTab(tab, after) { const i = after ? GL_TABS.findIndex((t) => t.id 
 function glGo(tab, opts = {}) { GL.tab = tab; Object.assign(GL, opts); if (document.querySelector(".nav.active")?.dataset.view !== "gitlab") document.querySelector('.nav[data-view="gitlab"]').click(); else glRender(); }
 
 function glLocalOnly() {
-  return `<div class="card narrow-wide"><h3>🦊 GitLab workspace runs on your laptop</h3>
-    <p>GitLab needs your office network / VPN and (later) the <code>git</code> program on your laptop, so this part works only in the local app — not on the website.</p>
-    <ol><li>Open a terminal in the JiraTime folder and run <code>node server.js</code>.</li><li>Open <b>http://localhost:3000</b> and come back to this tab.</li></ol>
-    <p class="muted tiny">Your Jira features keep working on both.</p></div>`;
+  return `<div class="card narrow-wide gl-bridge"><h3>🦊 Start JiraTime on your laptop to use GitLab</h3>
+    <p>This website cannot reach your office GitLab or run <code>git</code> itself. It uses the small JiraTime server on <b>your</b> laptop for that — your GitLab token stays on your laptop.</p>
+    <ol>
+      <li><b>First time only:</b> install Node.js and get the JiraTime folder: <code>git clone https://github.com/Rocky-Saini/JiraTime.git</code></li>
+      <li>In that folder run <code>node server.js</code> and keep the terminal open (VPN on).</li>
+      <li>Press <b>Try again</b>. If Chrome asks to let this site access devices on your local network, choose <b>Allow</b>.</li>
+    </ol>
+    <div class="row-actions"><button class="primary" data-glact="retrylocal" style="width:auto;margin:0">⟳ Try again</button><span class="muted tiny">Looking for the server at ${GL_LOCAL_URLS.map(esc).join(" / ")}</span></div>
+    <p class="muted tiny">Your Jira features work without it. Or open <b>http://localhost:3000</b> directly.</p></div>`;
 }
 
 function glConnectForm() {
@@ -290,7 +306,7 @@ function glWireConnect() {
     if (!body.url || !body.username || !body.token) { err.textContent = "Fill in URL, username and token"; return; }
     go.disabled = true; go.textContent = "Connecting…";
     try {
-      const r = await fetch("/api/gitlab/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const r = await fetch(GL_BASE + "/api/gitlab/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || `Failed (${r.status})`);
       $("#glTok").value = "";
@@ -547,13 +563,14 @@ function glTogglePin(id) {
 /** Extra actions registered by other files: data-glact="name:arg". */
 const GL_ACTIONS = {};
 async function glAction(act) {
+  if (act === "retrylocal") { GL.st = await glStatus(); glPill(); if (GL.st.connected) glLoadLocal(); glRender(); if (GL.st.connected) glRefresh(false); else if (!GL.st.available) toast("JiraTime server not found on this laptop — is node server.js running?"); return; }
   if (act === "refresh") { GL.tokenBad = ""; glHead(); glPill(); return glRefresh(true); }
   if (act === "replace") { GL.view = "connect"; return glRender(); }
   if (act === "more") { GL.f.limit += 100; return glFillProjects(); }
   if (act === "closedet") { GL.abort?.abort(); return closeModal(); }
   if (act === "disconnect") {
     if (!confirm("Disconnect GitLab? The token is removed from this laptop and the saved GitLab data is cleared.")) return;
-    await fetch("/api/gitlab/disconnect", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
+    await fetch(GL_BASE + "/api/gitlab/disconnect", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
     glResetData(); GL.st = await glStatus(); GL.view = null; toast("GitLab disconnected"); glPill(); return glRender();
   }
   if (act.startsWith("tab:")) { GL.tab = act.slice(4); return glRender(); }
