@@ -29,11 +29,23 @@ const glCreds = {
 };
 const GL_NET_HINT = "Could not reach GitLab from this browser — is the VPN on? If Chrome asked to allow access to devices on your local network, choose Allow (site settings → Local network access).";
 /** One request straight to GitLab with the user's token (direct mode). Returns the fetch Response. */
-async function glDirectFetch(base, token, path, { signal, method = "GET", body } = {}) {
-  const write = method !== "GET";
+const GL_WAIT_HINT = "No answer from GitLab in 25 seconds. Chrome is most likely waiting for your permission: look for a popup or an icon at the left of the address bar (“Local network access” / “devices on your local network”), choose Allow, then try again. Also check that the VPN is on.";
+/** Chrome's "local network access" permission for this site: "granted" | "denied" | "prompt" | "" (unknown). */
+async function glLnaState() {
+  for (const name of ["local-network-access", "local-network"]) { try { return (await navigator.permissions.query({ name })).state; } catch { /* name not known in this browser */ } }
+  return "";
+}
+async function glDirectFetch(base, token, path, { signal, method = "GET", body, timeout = 25000 } = {}) {
+  const write = method !== "GET", ctl = new AbortController(); let timedOut = false;
+  const t = setTimeout(() => { timedOut = true; ctl.abort(); }, timeout);
+  signal?.addEventListener("abort", () => ctl.abort(), { once: true });
   try {
-    return await fetch(base + "/api/v4" + path, { signal, method, cache: "no-store", headers: { Accept: "application/json", "PRIVATE-TOKEN": token, ...(write ? { "Content-Type": "application/json" } : {}) }, body: write ? JSON.stringify(body || {}) : undefined });
-  } catch (e) { if (e.name === "AbortError") throw e; throw new GlError(GL_NET_HINT, 0); }
+    return await fetch(base + "/api/v4" + path, { signal: ctl.signal, method, cache: "no-store", targetAddressSpace: "local", headers: { Accept: "application/json", "PRIVATE-TOKEN": token, ...(write ? { "Content-Type": "application/json" } : {}) }, body: write ? JSON.stringify(body || {}) : undefined });
+  } catch (e) {
+    if (timedOut) throw new GlError(GL_WAIT_HINT, 0);
+    if (e.name === "AbortError") throw e;
+    throw new GlError((await glLnaState()) === "denied" ? "Chrome is blocking this site from your local network, so it cannot reach GitLab. Click the icon at the left of the address bar → Site settings → Local network access → Allow, then reload." : GL_NET_HINT, 0);
+  } finally { clearTimeout(t); }
 }
 function glDirectError(r, data, write) {
   const m = data?.message ? (typeof data.message === "string" ? data.message : JSON.stringify(data.message)) : data?.error_description || data?.error || "";
@@ -375,6 +387,7 @@ function glWireConnect() {
     const body = { url: $("#glUrl").value.trim(), username: $("#glUser").value.trim(), token: $("#glTok").value.trim() };
     if (!body.url || !body.username || !body.token) { err.textContent = "Fill in URL, username and token"; return; }
     go.disabled = true; go.textContent = "Connecting…";
+    const slow = setTimeout(() => { if (go.disabled) err.innerHTML = '<span class="muted">Waiting for GitLab… If Chrome shows a popup asking to access devices on your local network, choose <b>Allow</b>.</span>'; }, 3500);
     try {
       let j;
       if (glDirect()) j = await glDirectConnect(body);
@@ -391,6 +404,7 @@ function glWireConnect() {
       toast(`Connected to GitLab as @${j.username}`); glPill();
       GL.tab = "overview"; glRender(); glRefresh(false);
     } catch (e) { err.textContent = e.message; go.disabled = false; go.textContent = "Connect"; }
+    finally { clearTimeout(slow); }
   };
   setTimeout(() => ($("#glUrl").value ? ($("#glUser").value ? $("#glTok") : $("#glUser")) : $("#glUrl")).focus(), 30);
 }
