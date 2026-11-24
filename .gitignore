@@ -1,3 +1,5 @@
 .env
-requstrix-export-*/
 node_modules/
+# browser network captures: contain session cookies / tokens
+requstrix-export-*/
+gitlab/

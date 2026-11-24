@@ -5,6 +5,8 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { proxy } = require("./lib/jira-proxy");
+const gitlab = require("./lib/gitlab");
+const localgit = require("./lib/localgit");
 
 const PORT = +process.env.PORT || 3000;
 const PUBLIC = path.join(__dirname, "public");
@@ -16,9 +18,9 @@ function readBody(req, max = 100_000) {
     req.on("end", () => resolve(b)); req.on("error", reject);
   });
 }
-function send(res, code, body, type = "application/json") {
+function send(res, code, body, type = "application/json", extra = {}) {
   if (code === 204) { res.writeHead(204, { "Cache-Control": "no-store" }); return res.end(); }
-  res.writeHead(code, { "Content-Type": type, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
+  res.writeHead(code, { ...extra, "Content-Type": type, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
   res.end(body);
 }
 
@@ -31,6 +33,16 @@ http.createServer(async (req, res) => {
       const body = ["POST", "PUT"].includes(req.method) ? await readBody(req) : undefined;
       const r = await proxy({ method: req.method, path: url.pathname.slice(5), query: url.search.slice(1), body, headers: req.headers });
       return send(res, r.status, r.body);
+    }
+    if (url.pathname.startsWith("/api/git/")) {
+      const body = req.method === "POST" ? await readBody(req, 6_000_000) : undefined;
+      const r = await localgit.handle({ method: req.method, path: url.pathname, query: url.search.slice(1), body, headers: req.headers });
+      if (r) return send(res, r.status, r.body, "application/json", r.headers);
+    }
+    if (url.pathname.startsWith("/api/gitlab/") || url.pathname.startsWith("/gl/")) {
+      const body = ["POST", "PUT"].includes(req.method) ? await readBody(req, 250_000) : undefined;
+      const r = await gitlab.handle({ method: req.method, path: url.pathname, query: url.search.slice(1), body, headers: req.headers });
+      if (r) return send(res, r.status, r.body, "application/json", r.headers);
     }
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
     const file = path.join(PUBLIC, name);

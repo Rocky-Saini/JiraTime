@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JiraTime</title>
 <link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="gl.css">
 </head>
 <body>
 <aside class="sidebar">
@@ -21,7 +22,7 @@
     <button class="nav" data-view="settings">⚙️ Settings</button>
     <button class="nav" data-view="help">📖 How to use</button>
   </nav>
-  <div class="side-foot"><button class="nav nwnav" data-view="nw">🏢 NewersWorld Timesheet</button><button id="themeBtn" class="ghost">🌗 Theme</button></div>
+  <div class="side-foot"><button class="nav nwnav glnav" data-view="gitlab">🦊 GitLab Workspace</button><button class="nav nwnav" data-view="nw">🏢 NewersWorld Timesheet</button><button id="themeBtn" class="ghost">🌗 Theme</button></div>
 </aside>
 <div id="navShade" class="nav-shade"></div>
 
@@ -29,6 +30,7 @@
   <header class="topbar">
     <button id="menuBtn" class="menuBtn ghost" aria-label="Menu">☰</button>
     <div id="conn" class="pill warn">Checking Jira…</div>
+    <button id="glPill" class="pill gl-pill hidden" type="button"></button>
     <button id="syncBtn" class="small ghost" title="Refresh from Jira">⟳ Refresh</button>
     <span id="syncInfo" class="muted tiny"></span>
     <div class="grow"></div>
@@ -257,6 +259,9 @@
     </div>
   </section>
 
+  <!-- GITLAB -->
+  <section id="view-gitlab" class="view"><div id="glMain"><p class="muted">Loading…</p></div></section>
+
   <!-- AI EFFICIENCY -->
   <section id="view-ai" class="view">
     <div class="row-actions">
@@ -307,6 +312,7 @@
           <button class="small" data-sec="h-hist">11 · History, undo &amp; reports</button>
           <button class="small" data-sec="h-set">12 · Settings &amp; holidays</button>
           <button class="small" data-sec="h-faq">13 · Problems &amp; answers</button>
+          <button class="small" data-sec="h-gl">14 · GitLab workspace</button>
         </div>
       </div>
 
@@ -452,6 +458,25 @@
         </ul>
       </div>
 
+      <div class="card" id="h-gl">
+        <h3>14 · GitLab workspace</h3>
+        <p>A separate workspace for your GitLab, with its own connection. It runs only in the local app (<code>node server.js</code> → http://localhost:3000), because GitLab is inside the office network.</p>
+        <ol>
+          <li>Create a Personal Access Token in GitLab (avatar → Edit profile → Access tokens). <code>read_api</code> is enough to look around; for merge requests, approvals, retries and push you need <code>api</code> + <code>write_repository</code>.</li>
+          <li>Open <b>🦊 GitLab Workspace</b> (bottom of the sidebar, or the 🦊 pill in the top bar), enter the GitLab URL, your username and the token, and press <b>Connect</b>.</li>
+          <li><b>Overview:</b> projects, active projects, open / assigned MRs, pending reviews, failed pipelines and your pushes of the last 7 days, plus the projects you worked on most recently.</li>
+          <li><b>Projects:</b> search, filter, ★ pin. Click a project for branches, commits (click one for its diff), MRs, pipelines and contributors, and <b>⬇ Clone</b> it into a folder you pick.</li>
+          <li><b>Local repos:</b> repositories on this laptop. Changes with a diff viewer (stage / unstage / discard per file or per hunk), commit with templates and a suggested message, push, pull, fetch, history with a branch graph, branches (create, switch, merge, rebase, compare, delete), stashes, revert, tag, reset. Discard and hard reset keep a backup first; JiraTime never force-pushes.</li>
+          <li><b>Conflicts:</b> after a merge, pull or rebase with conflicts, each conflict is shown side by side — accept current, incoming, both, or edit by hand — then <b>Mark resolved</b> and <b>Continue</b> (or Abort).</li>
+          <li><b>Merge requests:</b> created by you, assigned, review requested, or per project. Open one for overview, changes (with a rule-based smart review), commits, discussion and pipelines; approve, comment, edit, assign, label, draft / ready, close and merge. <b>＋ New merge request</b> / <b>🔀 Prepare MR</b> compares the branches and drafts the title and description from your commits.</li>
+          <li><b>Releases:</b> what changed after a date across many projects — commits, merged MRs and deployments are kept apart — by project, by developer, as a timeline, files changed since the release, CSV and an RCA draft. <b>Compare</b> does tag vs tag, branch, SHA or two dates, with release notes, CSV and print.</li>
+          <li><b>Pipelines:</b> jobs by stage, job logs with search and “first error”, retry a job or the failed jobs (asks first), environments and deployments. <b>Activity:</b> your or a project's GitLab timeline. <b>Jira links:</b> merge requests, branches and commits for a Jira key, and start a branch for it.</li>
+          <li><b>Ctrl + K</b> anywhere opens a search for pages, projects, repositories, merge requests and actions; type a Jira key to look it up in GitLab.</li>
+        </ol>
+        <p class="muted tiny">The token is checked with GitLab and stored only on this laptop (OS keyring, or <code>~/.config/jiratime/gitlab-token</code> readable only by you). The browser never receives it; git gets it only for the single command it runs. “Smart summary / review” and the RCA draft are rule-based: nothing is sent to an AI service.</p>
+        <button class="small" data-go="gitlab">Open GitLab workspace</button>
+      </div>
+
       <div class="card" id="h-faq">
         <h3>13 · Problems &amp; answers</h3>
         <dl class="faq">
@@ -544,5 +569,11 @@
 <script src="fields.js"></script>
 <script src="ai.js"></script>
 <script src="help.js"></script>
+<script src="gitlab.js"></script>
+<script src="gl-diff.js"></script>
+<script src="gl-local.js"></script>
+<script src="gl-mr.js"></script>
+<script src="gl-release.js"></script>
+<script src="gl-ops.js"></script>
 </body>
 </html>
