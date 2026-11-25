@@ -46,6 +46,24 @@ function uiDialog({ title = "", message = "", input = null, value = "", placehol
     setTimeout(() => (inp ? (inp.focus(), inp.select()) : okB.focus()), 20);
   });
 }
+/** Tells the user when a newer JiraTime was published while this page was open (checks every 10 minutes). */
+(function versionWatch() {
+  if (["localhost", "127.0.0.1"].includes(location.hostname)) return;
+  let first = "";
+  const tag = () => fetch("/app.js", { method: "HEAD", cache: "no-store" }).then((r) => r.headers.get("etag") || r.headers.get("last-modified") || "").catch(() => "");
+  const check = async () => {
+    const t = await tag(); if (!t) return;
+    if (!first) { first = t; return; }
+    if (t !== first && !document.getElementById("newVer")) {
+      const b = document.createElement("div"); b.id = "newVer"; b.className = "new-ver";
+      b.innerHTML = '✨ A new version of JiraTime is available. <button class="small primary-s">Reload now</button>';
+      b.querySelector("button").onclick = () => location.reload();
+      document.body.appendChild(b);
+    }
+  };
+  check(); setInterval(check, 10 * 60e3);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
+})();
 const uiConfirm = (message, opts = {}) => uiDialog({ title: opts.title || "Please confirm", message, ok: opts.ok || "Yes, continue", danger: opts.danger ?? /delete|discard|drop|remove|reset|abort|close|revoke|clear|overwrite|replace|lost/i.test(message), cancel: opts.cancel ?? "Cancel" });
 const uiPrompt = (message, value = "", opts = {}) => uiDialog({ title: opts.title || "", message, input: true, value, placeholder: opts.placeholder || "", ok: opts.ok || "OK", match: opts.match || "" });
 
