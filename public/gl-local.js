@@ -108,8 +108,7 @@ async function gllRunClone(p, dest, name, proto) {
   $("#modalBox").innerHTML = `<h3>✅ ${job.existing ? "Already cloned" : "Cloned"} ${esc(p.name)}</h3><p><code>${esc(repo.path)}</code></p>
     <div class="row-actions">
       <button class="primary-s small" data-glact="openlocal:${p.id}">📂 Open repository</button>
-      <button class="small" data-glact="gllopen:${repo.id}|folder">Open folder</button>
-      ${GLLS.tools?.code ? `<button class="small" data-glact="gllopen:${repo.id}|code">Open in VS Code</button>` : ""}
+      ${gllOpenBtn(repo.id)}<button class="small" data-glact="gllopenin:${repo.id}|folder">📂 Open folder</button>
       <button class="small" data-glcopy="${esc(repo.path)}">Copy path</button></div>
     <div class="foot"><button data-glact="closedet">Close</button></div>`;
   glRerender();
@@ -212,8 +211,7 @@ async function gllRenderRepo() {
         <button class="small" data-glact="gllpull" title="git pull">⬇ Pull${st.behind ? ` <span class="gl-tc">${st.behind}</span>` : ""}</button>
         <button class="small ${st.ahead || !st.upstream ? "primary-s" : ""}" data-glact="gllpush" title="git push">⬆ Push${st.ahead ? ` <span class="gl-tc">${st.ahead}</span>` : !st.upstream && !st.detached ? " (new)" : ""}</button>
         ${window.GLM && p ? `<button class="small" data-glact="gllprepmr">🔀 Prepare MR</button>` : ""}
-        <button class="small" data-glact="gllopen:${repo.id}|folder" title="Open folder">📂</button>
-        ${GLLS.tools?.code ? `<button class="small" data-glact="gllopen:${repo.id}|code" title="Open in VS Code">VS Code</button>` : ""}
+        ${gllOpenBtn(repo.id)}
         ${window.GLKIRO ? `<button class="small" data-glact="gllkiro" title="Chat with Kiro CLI in this repository">🤖 Kiro</button>` : ""}
         <button class="small ghost" data-glact="gllmore" title="More">⋯</button></div></div>
     ${st.state ? `<div class="warnbox gll-state"><b>${esc(st.state)} in progress</b> — ${conflicts ? `${conflicts} file(s) in conflict. Resolve them in <b>Conflicts</b>.` : "all conflicts resolved."}
@@ -620,7 +618,7 @@ async function gllfOpen(p) {
   ed.innerHTML = '<p class="muted"><span class="spin"></span> Opening…</p>';
   let f; try { f = await gitApi(`/file?repo=${GLLS.cur}&path=${enc(p)}`); } catch (e) { ed.innerHTML = `<div class="warnbox">${esc(e.message)}</div>`; GLLF.file = null; return; }
   const head = `<div class="gllf-h"><b title="${esc(p)}">${esc(p)}</b><span class="muted tiny">${gllfSize(f.size)}</span><span id="gllfSt" class="muted tiny"></span><span class="grow"></span>
-    ${window.GLKIRO ? '<button class="small" data-glact="gllfkiro">🤖 Ask Kiro</button>' : ""}<button class="small ghost" data-glact="gllfren">✎ Rename</button><button class="small ghost danger" data-glact="gllfdel">🗑 Delete</button>
+    ${gllOpenBtn(GLLS.cur, p)}${window.GLKIRO ? '<button class="small" data-glact="gllfkiro">🤖 Ask Kiro</button>' : ""}<button class="small ghost" data-glact="gllfren">✎ Rename</button><button class="small ghost danger" data-glact="gllfdel">🗑 Delete</button>
     ${f.content != null ? '<button class="small primary-s" data-glact="gllfsave">💾 Save</button>' : ""}</div>`;
   if (f.content == null) { ed.innerHTML = head + `<div class="gll-hero"><p class="muted">${f.tooBig ? "File larger than 2 MB — open it in your editor." : "Binary file — cannot be edited here."}</p></div>`; return; }
   ed.innerHTML = head + `<textarea id="gllfTa" class="gllf-ta" spellcheck="false"></textarea>`;
@@ -632,11 +630,50 @@ async function gllfOpen(p) {
   });
 }
 
+// ================= Open with … (editors installed on this computer) =================
+const GLLE = { list: null, at: 0, def: localStorage.getItem("jiratime.gl.editor") || "" };
+async function gllEditors(force) {
+  if (!GLLE.list || force || Date.now() - GLLE.at > 5 * 60e3) { try { GLLE.list = (await gitApi(`/editors${force ? "?force=1" : ""}`)).editors || []; GLLE.at = Date.now(); } catch { GLLE.list = GLLE.list || []; } }
+  return GLLE.list;
+}
+const gllEdName = (id) => (id === "folder" ? "file manager" : GLLE.list?.find((e) => e.id === id)?.name || "");
+const gllEdIcon = (n) => (/visual studio code|vscodium/i.test(n) ? "🟦" : /kiro/i.test(n) ? "👻" : /cursor/i.test(n) ? "⬛" : /intellij|idea|pycharm|webstorm|goland|jetbrains|android/i.test(n) ? "🧠" : /eclipse/i.test(n) ? "🌘" : /sublime|zed/i.test(n) ? "✳" : n === "file manager" ? "📂" : "📝");
+/** Split button: [Open in <default editor>] [▾ choose]. */
+function gllOpenBtn(repoId, rel = "") {
+  const def = GLLE.def && (GLLE.def === "folder" || GLLE.list?.some((e) => e.id === GLLE.def)) ? GLLE.def : "", n = def ? gllEdName(def) : "";
+  if (!GLLE.list) gllEditors().then(() => { if (GLLE.list.length) document.querySelectorAll(".gll-openbtn[data-pending]").forEach((el) => { const t = document.createElement("span"); t.innerHTML = gllOpenBtn(el.dataset.repo, el.dataset.rel || ""); el.replaceWith(t.firstElementChild); }); });
+  const arg = `${esc(repoId)}|${esc(rel)}`;
+  return `<span class="gll-openbtn" ${GLLE.list ? "" : "data-pending"} data-repo="${esc(repoId)}" data-rel="${esc(rel)}">${def ? `<button class="small" data-glact="gllopenin:${esc(repoId)}|${esc(def)}|${esc(rel)}" title="Open ${rel ? "this file" : "the repository"} in ${esc(n)}">${gllEdIcon(n)} ${esc(n.replace(/ Community( Edition)?.*$/, ""))}</button>` : ""}<button class="small ${def ? "gll-caret" : ""}" data-glact="gllopenmenu:${arg}" title="Open with …">${def ? "▾" : "↗ Open with ▾"}</button></span>`;
+}
+async function gllOpenIn(repoId, ed, rel = "") {
+  const n = gllEdName(ed) || "editor";
+  const r = await gllDo(`Open in ${n}`, () => gitApi("/open", { repo: repoId, editor: ed, path: rel || undefined }), { quiet: true });
+  if (r) toast(`Opening in ${n}…`);
+}
+async function gllOpenMenu(repoId, rel = "") {
+  openModal('<div class="gll-ow"><h3>↗ Open with …</h3><p class="muted"><span class="spin"></span> Looking for editors on this computer…</p></div>');
+  const list = await gllEditors(true);
+  const repo = GLLS.repos?.find((r) => r.id === repoId);
+  $("#modalBox").innerHTML = `<div class="gll-ow"><h3>↗ Open ${rel ? `<code>${esc(rel)}</code>` : esc(repo?.name || "repository")} with …</h3>
+    ${list.length ? "" : '<p class="muted">No code editors were found on this computer.</p>'}
+    <div class="gll-owl">${[...list, { id: "folder", name: "file manager" }].map((e) => `<button class="gll-owi ${e.id === GLLE.def ? "on" : ""}" data-owed="${esc(e.id)}"><span class="gll-owic">${gllEdIcon(e.name)}</span><span>${e.id === "folder" ? "📂 Show in file manager" : esc(e.name)}</span>${e.id === GLLE.def ? '<span class="b new">default</span>' : ""}</button>`).join("")}</div>
+    <label class="check tiny"><input type="checkbox" id="gllOwDef" ${GLLE.def ? "" : "checked"}> Use my choice as the default (one click next time)</label>
+    <div class="foot"><button data-glact="closedet">Cancel</button></div></div>`;
+  $("#modalBox").querySelectorAll("[data-owed]").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation(); const ed = b.dataset.owed;
+    if ($("#gllOwDef").checked && ed !== "folder") { GLLE.def = ed; localStorage.setItem("jiratime.gl.editor", ed); }
+    closeModal(); gllOpenIn(repoId, ed, rel);
+    document.querySelectorAll(".gll-openbtn").forEach((el) => { const t = document.createElement("span"); t.innerHTML = gllOpenBtn(el.dataset.repo, el.dataset.rel || ""); el.replaceWith(t.firstElementChild); });
+  }));
+}
+
 // ================= actions =================
 Object.assign(GL_ACTIONS, {
   clone: (pid) => { const p = GL.projects.find((x) => x.id === +pid); if (p) (glDirect() && !GL_GIT ? gllCloneDirect(p) : gllClone(p)); },
   openlocal: async (pid) => { await gllLoad(); const r = gllLocalFor(GL.projects.find((x) => x.id === +pid)); if (r) gllOpenRepo(r.id); },
-  gllopen: (arg) => { const [id, what] = arg.split("|"); gllDo(what === "code" ? "Open in VS Code" : "Open folder", () => gitApi("/open", { repo: id, what }), { quiet: true }); },
+  gllopenin: (arg) => { const [id, ed, ...rest] = arg.split("|"); gllOpenIn(id, ed, rest.join("|")); },
+  gllopenmenu: (arg) => { const [id, ...rest] = arg.split("|"); gllOpenMenu(id, rest.join("|")); },
+  gllopen: (arg) => { const [id, what] = arg.split("|"); gllOpenIn(id, what === "code" ? (GLLE.list?.find((e) => /visual studio code/i.test(e.name))?.id || "folder") : "folder"); },
   gllrefresh: () => { GLLS.st = {}; gllRenderTab(); },
   glladd: async () => { const d = await gllPickFolder(GLLS.lastDest, { title: "Choose a folder that is a git repository", allowRepo: true, button: "Add this repository" }); if (!d) return; const r = await gllDo("Add repository", () => gitApi("/repos/add", { path: d })); if (r) { await gllLoad(true); gllOpenRepo(r.repo.id); } },
   gllscan: async () => { const d = await gllPickFolder(GLLS.lastDest, { title: "Find git repositories inside…", allowRepo: true, button: "Scan this folder" }); if (!d) return; const r = await gllDo("Scan", () => gitApi("/scan", { root: d }), { quiet: true }); if (r) { toast(`Found ${r.added.length} repositor${r.added.length === 1 ? "y" : "ies"}`); GLLS.repos = r.repos; gllRenderTab(); } },

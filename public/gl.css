@@ -357,3 +357,8 @@ a.gll-big:hover{border-color:var(--gl);box-shadow:var(--sh)}
 .ui-dlg-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
 button.danger-s{background:var(--bad);border:0;color:#fff;font-weight:600}
 .new-ver{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:95;display:flex;gap:12px;align-items:center;background:var(--bg2);border:1px solid var(--acc);border-radius:12px;padding:10px 16px;box-shadow:0 12px 40px rgba(0,0,0,.4);font-size:13.5px}
+/* Open with … */
+.gll-openbtn{display:inline-flex}.gll-openbtn>button:first-child:not(:only-child){border-radius:9px 0 0 9px}.gll-openbtn .gll-caret{border-radius:0 9px 9px 0;border-left:0;padding-left:7px;padding-right:7px}
+.gll-owl{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;margin:12px 0}
+.gll-owi{display:flex;align-items:center;gap:10px;text-align:left;padding:12px 14px;border-radius:12px;font-size:13.5px}.gll-owi:hover{border-color:var(--gl);box-shadow:var(--sh)}.gll-owi.on{border-color:var(--acc)}
+.gll-owic{width:30px;height:30px;border-radius:9px;background:var(--cell);display:inline-flex;align-items:center;justify-content:center;font-size:16px;flex:none}
