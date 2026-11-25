@@ -460,7 +460,7 @@
 
       <div class="card" id="h-gl">
         <h3>14 · GitLab workspace</h3>
-        <p>A separate workspace for your GitLab, with its own connection. It runs only in the local app (<code>node server.js</code> → http://localhost:3000), because GitLab is inside the office network.</p>
+        <p>A separate workspace for your GitLab, with its own connection. Your browser talks to your GitLab directly, so the VPN must be on. Working with folders on your laptop (clone into a folder, commit, push, conflicts) uses the JiraTime helper, which you set up once from <b>GitLab → Local repos</b>.</p>
         <ol>
           <li>Create a Personal Access Token in GitLab (avatar → Edit profile → Access tokens). <code>read_api</code> is enough to look around; for merge requests, approvals, retries and push you need <code>api</code> + <code>write_repository</code>.</li>
           <li>Open <b>🦊 GitLab Workspace</b> (bottom of the sidebar, or the 🦊 pill in the top bar), enter the GitLab URL, your username and the token, and press <b>Connect</b>.</li>

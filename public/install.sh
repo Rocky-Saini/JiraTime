@@ -8,11 +8,12 @@
 set -euo pipefail
 DIR="${JIRATIME_DIR:-$HOME/.local/share/jiratime}"
 REPO="https://github.com/Rocky-Saini/JiraTime.git"
-PORT="${PORT:-3000}"
+PORT="${PORT:-9027}"
 OS="$(uname -s)"
 UNIT="$HOME/.config/systemd/user/jiratime.service"
 PLIST="$HOME/Library/LaunchAgents/com.jiratime.helper.plist"
 
+# an older manual setup on port 3000 started by hand is not touched; only the background helper is managed here
 if [ "${1:-}" = "--uninstall" ]; then
   if [ "$OS" = "Linux" ]; then systemctl --user disable --now jiratime.service 2>/dev/null || true; rm -f "$UNIT"; systemctl --user daemon-reload 2>/dev/null || true; fi
   if [ "$OS" = "Darwin" ]; then launchctl unload "$PLIST" 2>/dev/null || true; rm -f "$PLIST"; fi
@@ -31,7 +32,7 @@ echo "→ Getting JiraTime into $DIR"
 if [ -d "$DIR/.git" ]; then git -C "$DIR" pull --ff-only -q; else mkdir -p "$(dirname "$DIR")"; git clone -q --depth 1 "$REPO" "$DIR"; fi
 
 if [ "$OS" = "Linux" ]; then
-  command -v systemctl >/dev/null 2>&1 || { echo "✗ systemd not found. Start it yourself: cd $DIR && node server.js"; exit 1; }
+  command -v systemctl >/dev/null 2>&1 || { echo "✗ This Linux has no systemd user services, so the JiraTime helper cannot start by itself."; exit 1; }
   mkdir -p "$(dirname "$UNIT")"
   cat > "$UNIT" <<EOF
 [Unit]
@@ -67,15 +68,14 @@ EOF
   launchctl unload "$PLIST" 2>/dev/null || true
   launchctl load "$PLIST"
 else
-  echo "✗ This script supports Linux and macOS. On Windows run: cd $DIR && node server.js"; exit 1
+  echo "✗ The JiraTime helper supports Linux and macOS for now."; exit 1
 fi
 
 sleep 2
 if curl -s -m 3 "http://127.0.0.1:$PORT/api/gitlab/status" | grep -q '"api":2'; then
-  echo "✓ JiraTime helper is running on http://localhost:$PORT and starts by itself at every login."
-  echo "  Go back to the JiraTime website → GitLab → Local repos → “Connect this laptop”."
+  echo "✓ Done. The JiraTime helper runs in the background and starts by itself at every login."
+  echo "  Go back to JiraTime (https://jiratime-by-rocky.netlify.app) → GitLab → Local repos → “Connect this laptop”."
 else
-  echo "! The helper was installed but is not answering yet."
-  echo "  If you started 'node server.js' yourself on port $PORT, stop it (Ctrl+C) — the background helper takes over within 10 s."
+  echo "! The helper was installed but is not answering yet — wait 10 seconds and press “Connect this laptop” again."
   [ "$OS" = "Linux" ] && echo "  Status: systemctl --user status jiratime    Logs: journalctl --user -u jiratime -n 30"
 fi

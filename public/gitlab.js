@@ -1,7 +1,7 @@
 "use strict";
 /* GitLab workspace: connect, overview dashboard, project explorer and the shared API helpers.
    Two ways to reach GitLab:
-   - local app (node server.js on localhost): /api/gitlab/* + /gl/api/v4/*; the token stays in the server (keyring / 0600 file).
+   - pages served by the helper itself (development, JIRATIME_UI=1): /api/gitlab/* + /gl/api/v4/*; the token stays in the helper.
    - hosted website (Netlify): the browser calls the GitLab API directly (GitLab allows CORS); the token is kept in this
      browser's localStorage, like the Jira token. Local git (clone into a folder, commit, conflicts) then needs the laptop server.
    Uses globals from app.js ($, esc, toast, openModal, closeModal, JT, pool, sleep, agoText, ymdOf, addDays). */
@@ -15,10 +15,9 @@ const GL = {
 const GL_PIPE = { success: "good", failed: "low", running: "high", pending: "noest", created: "noest", preparing: "noest", waiting_for_resource: "noest",
   canceled: "noest", skipped: "noest", manual: "over", scheduled: "noest" };
 const enc = encodeURIComponent;
-/** "" when this page comes from the local JiraTime server; "http://localhost:3000" when it is the hosted website
-    talking to the JiraTime server running on this laptop. */
+/** "" when the page comes from the helper itself; otherwise the helper's address on this laptop (never shown to users). */
 let GL_BASE = "";
-const GL_LOCAL_URLS = [localStorage.getItem("jiratime.gl.localUrl") || "http://localhost:3000", "http://127.0.0.1:3000"].filter((v, i, a) => a.indexOf(v) === i);
+const GL_LOCAL_URLS = [localStorage.getItem("jiratime.gl.localUrl") || "http://127.0.0.1:9027", "http://localhost:9027"].filter((v, i, a) => a.indexOf(v) === i);
 const glHosted = () => !["localhost", "127.0.0.1"].includes(location.hostname);
 /** Direct mode = hosted website talking to GitLab from the browser. "laptop" mode uses the JiraTime server on this laptop. */
 const glDirect = () => glHosted() && localStorage.getItem("jiratime.gl.mode") !== "laptop";
@@ -119,13 +118,13 @@ async function glApi(path, { signal, method = "GET", body } = {}) {
   for (let attempt = 1; ; attempt++) {
     let r;
     try { r = await fetch(GL_BASE + "/gl/api/v4" + path, { signal, method, headers: { Accept: "application/json", ...(write ? { "Content-Type": "application/json" } : {}) }, body: write ? JSON.stringify(body || {}) : undefined }); }
-    catch (e) { if (e.name === "AbortError") throw e; throw new GlError("The local JiraTime server is not reachable — is node server.js running?", 0); }
+    catch (e) { if (e.name === "AbortError") throw e; throw new GlError("The JiraTime helper on this laptop is not answering. Run the one-time setup again (GitLab → Local repos).", 0); }
     if (r.status === 429 && attempt <= 2) { await sleep(Math.min(30, +r.headers.get("retry-after") || 3) * 1000); continue; }   // GitLab rate limit
     if (!write && [502, 503, 504].includes(r.status) && attempt <= 2) { await sleep(attempt * 1200); continue; }               // never repeat a change
     let data = null; try { data = await r.json(); } catch { /* empty */ }
     if (!r.ok) {
       let msg = data?.error || `GitLab ${r.status}`;
-      if (/endpoint not allowed|change not allowed/.test(msg) && GL.st?.api !== GL_SERVER_API) msg += " — the JiraTime server on this laptop is an old version: stop it (Ctrl+C) and start node server.js again";
+      if (/endpoint not allowed|change not allowed/.test(msg) && GL.st?.api !== GL_SERVER_API) msg += " — the JiraTime helper on this laptop is out of date: run the setup command again (GitLab → Local repos)";
       if (r.status === 401 || r.status === 412) { GL.tokenBad = msg; glHead(); glPill(); }
       throw new GlError(msg, r.status);
     }
@@ -168,9 +167,9 @@ async function gitApi(p, body, { method } = {}) {
   if (glDirect() && !GL_GIT) throw new GlError("Local git needs the JiraTime helper on this laptop — set it up once in GitLab → Local repos.", 0);
   let r;
   try { r = await fetch((glDirect() ? GL_GIT : GL_BASE) + "/api/git" + p, body !== undefined || method === "POST" ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) } : {}); }
-  catch { throw new GlError("The local JiraTime server is not reachable — is node server.js running?", 0); }
+  catch { throw new GlError("The JiraTime helper on this laptop is not answering. Run the one-time setup again (GitLab → Local repos).", 0); }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new GlError(r.status === 404 && (!j.error || j.error === "Not found") ? "The JiraTime server on this laptop is an old version — stop it (Ctrl+C) and start node server.js again" : j.error || `Failed (${r.status})`, r.status);
+  if (!r.ok) throw new GlError(r.status === 404 && (!j.error || j.error === "Not found") ? "The JiraTime helper on this laptop is out of date — run the setup command again (GitLab → Local repos)" : j.error || `Failed (${r.status})`, r.status);
   return j;
 }
 async function glStatusAt(base) {
@@ -356,15 +355,12 @@ function glAddTab(tab, after) { const i = after ? GL_TABS.findIndex((t) => t.id 
 function glGo(tab, opts = {}) { GL.tab = tab; Object.assign(GL, opts); if (document.querySelector(".nav.active")?.dataset.view !== "gitlab") document.querySelector('.nav[data-view="gitlab"]').click(); else glRender(); }
 
 function glLocalOnly() {
-  return `<div class="card narrow-wide gl-bridge"><h3>🦊 Start JiraTime on your laptop to use GitLab</h3>
-    <p>This website cannot reach your office GitLab or run <code>git</code> itself. It uses the small JiraTime server on <b>your</b> laptop for that — your GitLab token stays on your laptop.</p>
-    <ol>
-      <li><b>First time only:</b> install Node.js and get the JiraTime folder: <code>git clone https://github.com/Rocky-Saini/JiraTime.git</code></li>
-      <li>In that folder run <code>node server.js</code> and keep the terminal open (VPN on).</li>
-      <li>Press <b>Try again</b>. If Chrome asks to let this site access devices on your local network, choose <b>Allow</b>.</li>
-    </ol>
-    <div class="row-actions"><button class="primary" data-glact="retrylocal" style="width:auto;margin:0">⟳ Try again</button><span class="muted tiny">Looking for the server at ${GL_LOCAL_URLS.map(esc).join(" / ")}</span></div>
-    <p class="muted tiny">Your Jira features work without it. ${glHosted() ? '<button class="small" data-glact="usebrowser">← Use GitLab from this browser instead (no laptop server)</button>' : ""}</p></div>`;
+  return `<div class="card narrow-wide gl-bridge"><h3>🦊 Set up JiraTime on this laptop</h3>
+    <p>This option uses the JiraTime helper on your laptop for everything. Run this <b>once</b> in a terminal (VPN on); it starts by itself after that:</p>
+    <div class="gl-clone"><code>${esc(GL_INSTALL)}</code><button class="small" data-glcopy="${esc(GL_INSTALL)}">Copy</button></div>
+    <div class="row-actions" style="margin-top:10px"><button class="primary" data-glact="retrylocal" style="width:auto;margin:0">⟳ Try again</button>
+      <button class="small" data-glact="usebrowser">← Use GitLab from this browser instead</button></div>
+    <p class="muted tiny">If Chrome asks to let this site access apps / devices on this computer, choose <b>Allow</b>. Your Jira features work without it.</p></div>`;
 }
 
 function glConnectForm() {
@@ -446,7 +442,7 @@ function glHead() {
     <button class="small" data-glact="replace">Replace token</button>
     <button class="small danger" data-glact="disconnect">Disconnect</button></div>
     ${GL.tokenBad ? `<div class="warnbox">⚠ ${esc(GL.tokenBad)} <button class="small" data-glact="replace">Replace token</button></div>` : ""}
-    ${old ? '<div class="warnbox gl-old"><b>⚠ The JiraTime server on this laptop is an older version than this page.</b> Clone, local repositories, merge request details and other new parts will fail with “Not found” / “not allowed”. Stop the server in its terminal (Ctrl+C), start <code>node server.js</code> again and reload this page.</div>' : ""}
+    ${old ? '<div class="warnbox gl-old"><b>⚠ The JiraTime helper on this laptop is older than this page.</b> Clone, local repositories, merge request details and other new parts will fail with “Not found” / “not allowed”. Run the setup command again (GitLab → Local repos) and reload this page.</div>' : ""}
     ${glAccessLine(s)}
     ${!readOk ? '<div class="warnbox">⚠ This token has neither <code>read_api</code> nor <code>api</code> scope, so GitLab will refuse most requests. Create a token with <code>read_api</code>.</div>' : ""}
     ${days != null && days >= 0 && days <= 14 ? `<div class="warnbox">The GitLab token expires in ${days} day${days === 1 ? "" : "s"}. Create a new one and use “Replace token”.</div>` : ""}`;
@@ -673,7 +669,7 @@ async function glAction(act) {
   if (act === "helperconnect") { toast("Looking for the JiraTime helper…"); const h = await glHelperConnect(); toast(h.found ? (h.old ? "The helper is an old version — run the setup command again to update it" : h.err ? "Helper found, but: " + h.err : "Laptop connected ✓") : "Helper not found on this laptop — run the setup command, then try again"); return glRender(); }
   if (act === "uselaptop") { localStorage.setItem("jiratime.gl.mode", "laptop"); return glAction("retrylocal"); }
   if (act === "usebrowser") { localStorage.removeItem("jiratime.gl.mode"); GL.st = await glStatus(); glResetData(); glPill(); glRender(); if (GL.st.connected) glRefresh(false); return; }
-  if (act === "retrylocal") { GL.st = await glStatus(); glPill(); if (GL.st.connected) glLoadLocal(); glRender(); if (GL.st.connected) glRefresh(false); else if (!GL.st.available) toast("JiraTime server not found on this laptop — is node server.js running?"); return; }
+  if (act === "retrylocal") { GL.st = await glStatus(); glPill(); if (GL.st.connected) glLoadLocal(); glRender(); if (GL.st.connected) glRefresh(false); else if (!GL.st.available) toast("JiraTime helper not found on this laptop — run the setup command first"); return; }
   if (act === "refresh") { GL.tokenBad = ""; glHead(); glPill(); return glRefresh(true); }
   if (act === "replace") { GL.view = "connect"; return glRender(); }
   if (act === "more") { GL.f.limit += 100; return glFillProjects(); }

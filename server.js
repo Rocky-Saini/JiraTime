@@ -8,7 +8,11 @@ const { proxy } = require("./lib/jira-proxy");
 const gitlab = require("./lib/gitlab");
 const localgit = require("./lib/localgit");
 
-const PORT = +process.env.PORT || 3000;
+const PORT = +process.env.PORT || 9027;
+// The helper has no user interface of its own: people always use the JiraTime website.
+// Opening the helper's address in a browser sends them there. JIRATIME_UI=1 serves the pages locally (development only).
+const SITE = process.env.JIRATIME_SITE || "https://jiratime-by-rocky.netlify.app";
+const SERVE_UI = process.env.JIRATIME_UI === "1";
 // Websites that may use the GitLab / git part of this local server from the browser (the hosted JiraTime).
 // Only these origins get CORS access; every other site is still refused.
 const BRIDGE_ORIGINS = (process.env.JIRATIME_ORIGINS || "https://jiratime-by-rocky.netlify.app").split(",").map((x) => x.trim().replace(/\/+$/, "")).filter(Boolean);
@@ -58,10 +62,11 @@ http.createServer(async (req, res) => {
       const r = await gitlab.handle({ method: req.method, path: url.pathname, query: url.search.slice(1), body, headers: req.headers });
       if (r) return send(res, r.status, r.body, "application/json", { ...r.headers, ...cors });
     }
+    if (!SERVE_UI && req.method === "GET" && !local && !url.pathname.startsWith("/jira/")) { res.writeHead(302, { Location: SITE + "/", "Cache-Control": "no-store" }); return res.end(); }
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
     const file = path.join(PUBLIC, name);
     if (req.method === "GET" && file.startsWith(PUBLIC + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile())
       return send(res, 200, fs.readFileSync(file), (TYPES[path.extname(file)] || "application/octet-stream") + "; charset=utf-8");
     send(res, 404, '{"error":"Not found"}', "application/json", cors);
   } catch (e) { send(res, 502, JSON.stringify({ errorMessages: ["Server error: " + e.message] })); }
-}).listen(PORT, "127.0.0.1", () => console.log(`JiraTime running at http://localhost:${PORT}`));
+}).listen(PORT, "127.0.0.1", () => console.log(`JiraTime helper ready (port ${PORT})${SERVE_UI ? " — serving the pages too (JIRATIME_UI=1)" : ""}`));
