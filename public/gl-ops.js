@@ -261,64 +261,109 @@ function gljBranchDlg() {
 }
 
 // ================= Ctrl+K command palette =================
-const GLK = { items: [], sel: 0, q: "" };
+/* Searches JiraTime pages, GitLab tabs, actions, your GitLab projects, local repositories, merge requests (live from GitLab)
+   and Jira issues (live from Jira). Works on every page. */
+const GLK = { items: [], sel: 0, q: "", live: { q: "", jira: null, mrs: null, busy: 0 }, t: null, seq: 0 };
+const palGo = (view) => document.querySelector(`.nav[data-view="${view}"]`)?.click();
 function glkItems(q) {
-  const out = [], add = (group, icon, label, sub, run) => out.push({ group, icon, label, sub, run });
-  const key = (q.trim().match(/^[A-Z][A-Z0-9_]{1,9}-\d{1,7}$/) || [])[0];
-  if (key && GL.st?.connected) add("Jira", "🔗", `Find ${key} in GitLab`, "merge requests, branches, commits", () => { GL.tab = "jira"; glGo("jira"); gljFind(key); });
-  document.querySelectorAll(".nav[data-view]").forEach((b) => add("JiraTime", "›", b.textContent.trim(), "open page", () => b.click()));
-  if (GL.st?.connected) {
-    GL_TABS.forEach((t) => add("GitLab", t.icon, `GitLab · ${t.label}`, "tab", () => glGo(t.id)));
-    add("Actions", "＋", "New merge request", "", () => { glGo("mrs"); setTimeout(() => glAction("newmr:"), 50); });
+  const out = [], add = (group, icon, label, sub, run, extra = "") => out.push({ group, icon, label, sub, run, extra });
+  const key = (q.trim().match(/^[A-Za-z][A-Za-z0-9_]{1,9}-\d{1,7}$/) || [])[0]?.toUpperCase();
+  const glOn = !!GL.st?.connected, jiraOn = !!creds.get();
+  if (key) {
+    if (jiraOn) add("Jira", "🔗", `Open ${key} in Jira`, "new tab", () => window.open(`${creds.get().base}/browse/${key}`, "_blank", "noopener,noreferrer"));
+    if (glOn) add("Jira", "🦊", `Find ${key} in GitLab`, "merge requests, branches, commits", () => { glGo("jira"); setTimeout(() => gljFind(key), 80); });
+  }
+  document.querySelectorAll(".nav[data-view]").forEach((b) => add("Pages", "›", b.textContent.replace(/\s+\d+$/, "").trim(), "open page", () => b.click()));
+  if (glOn) GL_TABS.forEach((t) => add("GitLab", t.icon, `GitLab · ${t.label}`, "tab", () => glGo(t.id)));
+  if (glOn) {
+    add("Actions", "＋", "New merge request", "GitLab", () => { glGo("mrs"); setTimeout(() => glAction("newmr:"), 80); });
     add("Actions", "🚀", "What changed after a release date", "release analysis", () => glGo("release"));
     add("Actions", "⇄", "Compare two releases", "tags / branches / dates", () => glGo("compare"));
+    add("Actions", "🤖", "Ask Kiro about a repository", "Kiro chat", () => glGo("kiro"));
     add("Actions", "⟳", "Refresh GitLab data", "", () => { glGo(GL.tab || "overview"); glAction("refresh"); });
-    (window.GLL?.state.repos || []).forEach((r) => add("Local repositories", "📦", r.name, r.path.replace(/^\/home\/[^/]+/, "~"), () => window.GLL.open(r.id)));
-    (GLMS.list || []).forEach((m) => add("Merge requests", "⑂", `!${m.iid} ${glmStripDraft(m.title)}`, glmProj(m.project_id)?.name || "", () => glmOpen(m.project_id, m.iid)));
-    glRanked().forEach(({ p }) => add("Projects", "▤", p.name, p.path, () => { glGo("projects"); setTimeout(() => glOpenProject(p.id), 60); }));
   }
+  if (window.CT) add("Actions", "⏱", "Commit time: check my pushes now", "log time from commits", () => { palGo("committime"); setTimeout(() => ctScan({ manual: true }), 100); });
+  add("Actions", "⚡", "Fill my month", "calendar", () => { palGo("dashboard"); setTimeout(() => $("#bnFill")?.click(), 150); });
   add("Actions", "🌗", "Switch dark / light theme", "", () => $("#themeBtn")?.click());
+  (window.GLL?.state.repos || []).forEach((r) => add("Local repositories", "📦", r.name, r.path.replace(/^\/home\/[^/]+/, "~"), () => window.GLL.open(r.id)));
+  if (glOn) {
+    const seenMr = new Set();
+    for (const m of [...(GLK.live.q === q ? GLK.live.mrs || [] : []), ...(GLMS.list || [])]) {
+      const k = `${m.project_id}!${m.iid}`; if (seenMr.has(k)) continue; seenMr.add(k);
+      add("Merge requests", "⑂", `!${m.iid} ${glmStripDraft(m.title)}`, `${glmProj(m.project_id)?.name || ""} · ${m.state}`, () => glmOpen(m.project_id, m.iid), `${m.source_branch} ${m.author?.name || ""}`);
+    }
+    glRanked().forEach(({ p }) => add("GitLab projects", "▤", p.name, p.path, () => { glGo("projects"); setTimeout(() => glOpenProject(p.id), 80); }, `${p.desc} ${(p.topics || []).join(" ")}`));
+  }
+  if (GLK.live.q === q) (GLK.live.jira || []).forEach((i) => add("Jira issues", "🎫", `${i.key} ${i.summary}`, "open in Jira", () => window.open(`${creds.get().base}/browse/${i.key}`, "_blank", "noopener,noreferrer")));
   const toks = q.toLowerCase().split(/\s+/).filter(Boolean);
-  if (!toks.length) return out.filter((x) => x.group !== "Projects").slice(0, 40).concat(out.filter((x) => x.group === "Projects").slice(0, 8));
+  if (!toks.length) return out.filter((x) => !["GitLab projects", "Merge requests", "Jira issues"].includes(x.group)).concat(out.filter((x) => x.group === "GitLab projects").slice(0, 6));
   const score = (x) => {
-    const hay = `${x.label} ${x.sub}`.toLowerCase(); let s = 0;
-    for (const t of toks) { const i = hay.indexOf(t); if (i < 0) return -1; s += i === 0 ? 30 : /[\s/\-·]/.test(hay[i - 1]) ? 20 : 8; }
-    return s + (x.group === "Jira" ? 100 : x.group === "GitLab" || x.group === "Actions" ? 6 : 0) - x.label.length / 50;
+    const hay = `${x.label} ${x.sub} ${x.extra}`.toLowerCase(); let s = 0;
+    for (const t of toks) { const i = hay.indexOf(t); if (i < 0) return -1; s += i === 0 ? 30 : /[\s/\-·_.!]/.test(hay[i - 1]) ? 20 : 8; }
+    return s + ({ Jira: 200, Actions: 8, Pages: 8, GitLab: 6, "Local repositories": 12, "GitLab projects": 4, "Merge requests": 3, "Jira issues": 2 }[x.group] || 0) - x.label.length / 60;
   };
-  return out.map((x) => ({ x, s: score(x) })).filter((y) => y.s >= 0).sort((a, b) => b.s - a.s).slice(0, 60).map((y) => y.x);
+  const ranked = out.map((x) => ({ x, s: x.group === "Jira issues" ? 1 : score(x) })).filter((y) => y.s >= 0).sort((a, b) => b.s - a.s).map((y) => y.x);
+  // keep groups together, in the order of their best hit
+  const order = [...new Set(ranked.map((x) => x.group))];
+  return order.flatMap((g) => ranked.filter((x) => x.group === g).slice(0, g === "Pages" || g === "Actions" ? 6 : 8));
+}
+/** Live search in GitLab merge requests and Jira issues (debounced). */
+function palLive(q) {
+  clearTimeout(GLK.t);
+  if (q.trim().length < 3) { GLK.live = { q, jira: [], mrs: [], busy: 0 }; return; }
+  GLK.t = setTimeout(async () => {
+    const seq = ++GLK.seq; GLK.live = { q, jira: null, mrs: null, busy: 2 }; palDraw(true);
+    const done = () => { if (seq === GLK.seq && !$("#glPal").classList.contains("hidden")) palDraw(true); };
+    (creds.get() ? jira(API.picker(q.trim())).then((r) => (r?.sections || []).flatMap((s) => s.issues || []).filter((v, i, a) => a.findIndex((x) => x.key === v.key) === i).slice(0, 8).map((i) => ({ key: i.key, summary: i.summaryText || i.summary || "" }))).catch(() => []) : Promise.resolve([]))
+      .then((l) => { if (seq !== GLK.seq) return; GLK.live.jira = l; GLK.live.busy--; done(); });
+    (GL.st?.connected ? glApi(`/merge_requests?scope=all&state=opened&search=${enc(q.trim())}&per_page=8&order_by=updated_at`).then((r) => r.data || []).catch(() => []) : Promise.resolve([]))
+      .then((l) => { if (seq !== GLK.seq) return; GLK.live.mrs = l; GLK.live.busy--; done(); });
+  }, 280);
 }
 function glkOpen() {
   let el = $("#glPal");
   if (!el) {
     el = document.createElement("div"); el.id = "glPal"; el.className = "gl-pal hidden";
-    el.innerHTML = `<div class="gl-pal-box" role="dialog" aria-label="Command palette"><div class="gl-pal-in"><span>⌕</span><input id="glPalQ" placeholder="Search pages, projects, repositories, actions… or type a Jira key" autocomplete="off"><kbd>Esc</kbd></div><div id="glPalL" class="gl-pal-l" role="listbox"></div>
-      <div class="gl-pal-f muted tiny"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>Ctrl</kbd><kbd>K</kbd> toggle</span></div></div>`;
+    el.innerHTML = `<div class="gl-pal-box" role="dialog" aria-label="Search"><div class="gl-pal-in"><span>⌕</span><input id="glPalQ" placeholder="Search pages, projects, repositories, merge requests, Jira issues, actions…" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div><div id="glPalL" class="gl-pal-l" role="listbox"></div>
+      <div class="gl-pal-f muted tiny"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>Ctrl</kbd><kbd>K</kbd> open / close</span><span id="glPalS" class="grow" style="text-align:right"></span></div></div>`;
     document.body.appendChild(el);
     el.addEventListener("mousedown", (e) => { if (e.target === el) glkClose(); });
     const q = $("#glPalQ");
-    q.addEventListener("input", () => { GLK.q = q.value; GLK.sel = 0; glkDraw(); });
+    q.addEventListener("input", () => { GLK.q = q.value; GLK.sel = 0; palLive(q.value); palDraw(); });
     q.addEventListener("keydown", (e) => {
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); GLK.sel = (GLK.sel + (e.key === "ArrowDown" ? 1 : -1) + GLK.items.length) % Math.max(1, GLK.items.length); glkDraw(true); }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); const n = Math.max(1, GLK.items.length); GLK.sel = (GLK.sel + (e.key === "ArrowDown" ? 1 : -1) + n) % n; palDraw(true); }
       else if (e.key === "Enter") { e.preventDefault(); glkRun(GLK.sel); }
       else if (e.key === "Escape") { e.preventDefault(); glkClose(); }
     });
     $("#glPalL").addEventListener("click", (e) => { const it = e.target.closest("[data-k]"); if (it) glkRun(+it.dataset.k); });
-    $("#glPalL").addEventListener("mousemove", (e) => { const it = e.target.closest("[data-k]"); if (it && +it.dataset.k !== GLK.sel) { GLK.sel = +it.dataset.k; glkDraw(true); } });
+    $("#glPalL").addEventListener("mousemove", (e) => { const it = e.target.closest("[data-k]"); if (it && +it.dataset.k !== GLK.sel) { GLK.sel = +it.dataset.k; palDraw(true, true); } });
   }
-  el.classList.remove("hidden"); GLK.q = ""; GLK.sel = 0; $("#glPalQ").value = ""; glkDraw(); $("#glPalQ").focus();
-  if (GL.st?.connected && !GL.projects) glLoadProjects().then(() => { if (!el.classList.contains("hidden")) glkDraw(); }).catch(() => {});
+  el.classList.remove("hidden"); GLK.q = ""; GLK.sel = 0; GLK.live = { q: "", jira: [], mrs: [], busy: 0 }; $("#glPalQ").value = ""; palDraw(); setTimeout(() => $("#glPalQ").focus(), 0);
+  // make sure projects and local repositories are there to search
+  if (GL.st?.connected) {
+    if (!GL.projects) { glLoadLocal(); glLoadProjects().then(() => { if (!el.classList.contains("hidden")) palDraw(true); }).catch(() => {}); }
+    if (window.GLL && !window.GLL.state.repos && (!glDirect() || GL_GIT)) window.GLL.load().then(() => { if (!el.classList.contains("hidden")) palDraw(true); }).catch(() => {});
+  }
 }
-function glkClose() { $("#glPal")?.classList.add("hidden"); }
-function glkDraw(keepScroll) {
-  GLK.items = glkItems(GLK.q); let g = "";
-  $("#glPalL").innerHTML = GLK.items.map((x, i) => { const h = x.group !== g ? `<div class="gl-pal-g">${esc(x.group)}</div>` : ""; g = x.group;
-    return `${h}<div class="gl-pal-i ${i === GLK.sel ? "on" : ""}" data-k="${i}" role="option"><span class="gl-pal-ic">${esc(x.icon)}</span><span class="gl-pal-t">${esc(x.label)}</span><span class="muted tiny">${esc(x.sub)}</span></div>`; }).join("") || '<p class="muted tiny" style="padding:12px">Nothing found.</p>';
-  if (keepScroll) $("#glPalL .gl-pal-i.on")?.scrollIntoView({ block: "nearest" });
+function glkClose() { $("#glPal")?.classList.add("hidden"); clearTimeout(GLK.t); }
+function palDraw(keepSel, noScroll) {
+  const items = glkItems(GLK.q); GLK.items = items; if (!keepSel || GLK.sel >= items.length) GLK.sel = Math.min(GLK.sel, Math.max(0, items.length - 1));
+  const hl = (t) => { let h = esc(t); for (const w of GLK.q.trim().split(/\s+/).filter((x) => x.length > 1)) h = h.replace(new RegExp(`(${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "ig"), "<mark>$1</mark>"); return h; };
+  let g = "";
+  $("#glPalL").innerHTML = items.map((x, i) => { const h = x.group !== g ? `<div class="gl-pal-g">${esc(x.group)}</div>` : ""; g = x.group;
+    return `${h}<div class="gl-pal-i ${i === GLK.sel ? "on" : ""}" data-k="${i}" role="option"><span class="gl-pal-ic">${esc(x.icon)}</span><span class="gl-pal-t">${hl(x.label)}</span><span class="muted tiny">${esc(x.sub)}</span></div>`; }).join("")
+    || `<p class="muted tiny" style="padding:12px">${GLK.live.busy ? "Searching…" : "Nothing found."}</p>`;
+  const loading = [GL.st?.connected && !GL.projects ? "GitLab projects" : "", GLK.live.busy ? "GitLab & Jira" : ""].filter(Boolean);
+  $("#glPalS").innerHTML = loading.length ? `<span class="spin"></span> searching ${loading.join(", ")}…` : GL.st?.connected ? "" : "Connect GitLab to search projects";
+  if (!noScroll) $("#glPalL .gl-pal-i.on")?.scrollIntoView({ block: "nearest" });
 }
-function glkRun(i) { const it = GLK.items[i]; if (!it) return; glkClose(); if (modalOpen()) closeModal(); it.run(); }
+function glkRun(i) { const it = GLK.items[i]; if (!it) return; glkClose(); if (modalOpen()) closeModal(); try { it.run(); } catch (e) { toast(e.message); } }
 document.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") { e.preventDefault(); if ($("#glPal") && !$("#glPal").classList.contains("hidden")) glkClose(); else glkOpen(); }
-});
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === "k" || e.key === "K" || e.code === "KeyK")) {
+    e.preventDefault(); e.stopPropagation();
+    if ($("#glPal") && !$("#glPal").classList.contains("hidden")) glkClose(); else glkOpen();
+  }
+}, true);
 
 // ================= actions & tabs =================
 Object.assign(GL_ACTIONS, {
@@ -350,3 +395,4 @@ glAddTab({ id: "pipes", icon: "▶", label: "Pipelines", render: () => glpRender
 glAddTab({ id: "activity", icon: "≋", label: "Activity", render: () => glaRenderTab(), refresh: () => {} }, "pipes");
 glAddTab({ id: "jira", icon: "🔗", label: "Jira links", render: () => gljRenderTab(), refresh: () => {} }, "activity");
 window.GLP = { open: glpOpen };
+$("#palBtn")?.addEventListener("click", () => glkOpen());

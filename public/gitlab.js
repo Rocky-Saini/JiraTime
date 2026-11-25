@@ -719,6 +719,6 @@ async function glAction(act) {
   $("#modal").addEventListener("click", (e) => { if (e.target.closest("[data-gldet], [data-glact], [data-glcopy]")) onClick(e); });
   $("#glPill")?.addEventListener("click", () => glGo(GL.tab || "overview"));
   // show the GitLab pill in the top bar on every page (only the local app has the GitLab server part)
-  glStatus().then((st) => { if (!GL.st || !GL.st.connected) GL.st = st; glPill(); });
+  glStatus().then((st) => { if (!GL.st || !GL.st.connected) GL.st = st; glPill(); if (GL.st.connected) { glLoadLocal(); setTimeout(() => glLoadProjects().catch(() => {}), 3000); } });
   window.addEventListener("focus", () => { if (GL.st?.connected && document.querySelector('.nav.active')?.dataset.view === "gitlab" && Date.now() - GL.projAt > 10 * 60e3) glRefresh(false); });
 })();
