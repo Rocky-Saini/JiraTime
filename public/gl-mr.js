@@ -115,6 +115,7 @@ function glmDraw() {
       ${roleName ? `<span class="gl-role" title="Your role in this project">👤 ${roleName}</span>` : ""}
       ${a ? `<span class="tiny">${approved.length ? `✔ approved by ${esc(approved.map((u) => u.name).join(", "))}` : "not approved yet"}${left ? ` · <b>${left}</b> more approval${left === 1 ? "" : "s"} needed` : ""}</span>` : ""}
       <span class="grow"></span>
+      ${window.GLKIRO ? '<button class="small" data-glact="kiromr" title="Kiro reads the full diff on your laptop and writes a review">🤖 Review with Kiro</button>' : ""}
       ${open && a?.user_can_approve && !a.user_has_approved ? '<button class="small primary-s" data-glact="glmapprove">✔ Approve</button>' : open && a && !a.user_has_approved && !a.user_can_approve ? `<span class="muted tiny" title="${mine ? "GitLab does not let authors approve their own merge request here" : "You are not an eligible approver for this merge request"}">🔒 can't approve</span>` : ""}
       ${open && a?.user_has_approved ? '<button class="small" data-glact="glmunapprove">Revoke approval</button>' : ""}
       ${open ? `<button class="small" data-glact="glmedit">✎ Edit</button><button class="small" data-glact="glmdraft">${glmIsDraft(m) ? "Mark ready" : "Mark as draft"}</button>

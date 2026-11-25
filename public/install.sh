@@ -42,6 +42,8 @@ Description=JiraTime laptop helper (git + GitLab for the JiraTime website)
 WorkingDirectory=$DIR
 ExecStart=$NODE $DIR/server.js
 Environment=PORT=$PORT
+Environment=PATH=$(dirname "$NODE"):$HOME/.local/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin
+Environment=DISPLAY=${DISPLAY:-:0}
 Restart=always
 RestartSec=10
 

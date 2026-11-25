@@ -214,6 +214,7 @@ async function gllRenderRepo() {
         ${window.GLM && p ? `<button class="small" data-glact="gllprepmr">🔀 Prepare MR</button>` : ""}
         <button class="small" data-glact="gllopen:${repo.id}|folder" title="Open folder">📂</button>
         ${GLLS.tools?.code ? `<button class="small" data-glact="gllopen:${repo.id}|code" title="Open in VS Code">VS Code</button>` : ""}
+        ${window.GLKIRO ? `<button class="small" data-glact="gllkiro" title="Chat with Kiro CLI in this repository">🤖 Kiro</button>` : ""}
         <button class="small ghost" data-glact="gllmore" title="More">⋯</button></div></div>
     ${st.state ? `<div class="warnbox gll-state"><b>${esc(st.state)} in progress</b> — ${conflicts ? `${conflicts} file(s) in conflict. Resolve them in <b>Conflicts</b>.` : "all conflicts resolved."}
       <span class="grow"></span>${conflicts ? "" : `<button class="small primary-s" data-glact="gllcontinue">Continue ${esc(st.state)}</button>`} <button class="small danger" data-glact="gllabort">Abort ${esc(st.state)}</button></div>` : ""}
@@ -560,6 +561,7 @@ Object.assign(GL_ACTIONS, {
       <button class="small" data-glact="glltpl">Branch &amp; commit templates</button><button class="small danger" data-glact="gllremove:${repo.id}">Remove from JiraTime (keeps the folder)</button></div>
       <div class="foot"><button data-glact="closedet">Close</button></div>`);
   },
+  gllkiro: () => { window.GLKIRO?.setRepo(GLLS.cur); glGo("kiro"); },
   gllsub: (s) => { closeModal(); GLLS.sub = s; gllRenderRepo(); },
   glltpl: () => {
     const t = gllTpl();

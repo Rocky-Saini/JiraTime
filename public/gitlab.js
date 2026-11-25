@@ -573,6 +573,7 @@ function glOpenProject(id, tab = "info") {
     <div class="gl-det-head"><div><h3>${esc(p.name)}</h3><div class="muted tiny">${esc(p.path)}</div></div><div class="grow"></div>
       ${window.GLL ? ((!glDirect() || GL_GIT) && window.GLL.localFor(p) ? `<button class="small" data-glact="openlocal:${p.id}">📂 Open local repo</button>` : `<button class="small primary-s" data-glact="clone:${p.id}">⬇ Clone</button>`) : ""}
       ${window.GLM ? `<button class="small" data-glact="newmr:${p.id}">＋ Merge request</button>` : ""}
+      ${window.GLKIRO ? `<button class="small" data-glact="kiroproject:${p.id}" title="Analyse / review this project with Kiro CLI">🤖 Ask Kiro</button>` : ""}
       ${glLink(p.web, "Open in GitLab ↗", "small gl-ext")}</div>
     <div class="gl-sub">${GL_DTABS.map(([t, l]) => `<button class="gl-tab ${t === tab ? "on" : ""}" data-gldtab="${t}">${l}</button>`).join("")}</div>
     <div id="glDetBody" class="gl-det-body"><p class="muted">Loading…</p></div>
