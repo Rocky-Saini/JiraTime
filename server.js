@@ -13,6 +13,26 @@ const PORT = +process.env.PORT || 9027;
 // Opening the helper's address in a browser sends them there. JIRATIME_UI=1 serves the pages locally (development only).
 const SITE = process.env.JIRATIME_SITE || "https://jiratime-by-rocky.netlify.app";
 const SERVE_UI = process.env.JIRATIME_UI === "1";
+// Installed helper (install.sh sets JIRATIME_AUTOUPDATE=1): pull new versions from GitHub at start and every 30 minutes.
+// After an update the process exits and the service manager starts the new version (no running git / Kiro work is cut:
+// it waits until none is running).
+function autoUpdate() {
+  if (process.env.JIRATIME_AUTOUPDATE !== "1" || !fs.existsSync(path.join(__dirname, ".git"))) return;
+  const { execFile } = require("child_process");
+  const check = () => execFile("git", ["-C", __dirname, "pull", "--ff-only", "-q"], { timeout: 120_000 }, (e) => {
+    if (e) return;
+    execFile("git", ["-C", __dirname, "rev-parse", "HEAD"], (e2, head) => {
+      head = String(head || "").trim(); if (e2 || !head) return;
+      if (!autoUpdate.head) { autoUpdate.head = head; return; }
+      if (head === autoUpdate.head) return;
+      const busy = () => [...require("./lib/kiro").JOBS.values()].some((j) => j.status === "running");
+      const restart = () => (busy() ? setTimeout(restart, 30_000) : (console.log("JiraTime helper updated — restarting"), process.exit(0)));
+      restart();
+    });
+  });
+  execFile("git", ["-C", __dirname, "rev-parse", "HEAD"], (e, h) => { autoUpdate.head = String(h || "").trim(); check(); });
+  setInterval(check, 30 * 60e3).unref();
+}
 // Websites that may use the GitLab / git part of this local server from the browser (the hosted JiraTime).
 // Only these origins get CORS access; every other site is still refused.
 const BRIDGE_ORIGINS = (process.env.JIRATIME_ORIGINS || "https://jiratime-by-rocky.netlify.app").split(",").map((x) => x.trim().replace(/\/+$/, "")).filter(Boolean);
@@ -69,4 +89,4 @@ http.createServer(async (req, res) => {
       return send(res, 200, fs.readFileSync(file), (TYPES[path.extname(file)] || "application/octet-stream") + "; charset=utf-8");
     send(res, 404, '{"error":"Not found"}', "application/json", cors);
   } catch (e) { send(res, 502, JSON.stringify({ errorMessages: ["Server error: " + e.message] })); }
-}).listen(PORT, "127.0.0.1", () => console.log(`JiraTime helper ready (port ${PORT})${SERVE_UI ? " — serving the pages too (JIRATIME_UI=1)" : ""}`));
+}).listen(PORT, "127.0.0.1", () => { autoUpdate(); console.log(`JiraTime helper ready (port ${PORT})${SERVE_UI ? " — serving the pages too (JIRATIME_UI=1)" : ""}`); });

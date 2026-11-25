@@ -42,6 +42,7 @@ Description=JiraTime laptop helper (git + GitLab for the JiraTime website)
 WorkingDirectory=$DIR
 ExecStart=$NODE $DIR/server.js
 Environment=PORT=$PORT
+Environment=JIRATIME_AUTOUPDATE=1
 Environment=PATH=$(dirname "$NODE"):$HOME/.local/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin
 Environment=DISPLAY=${DISPLAY:-:0}
 Restart=always
@@ -74,7 +75,7 @@ else
 fi
 
 sleep 2
-if curl -s -m 3 "http://127.0.0.1:$PORT/api/gitlab/status" | grep -q '"api":2'; then
+if curl -s -m 3 "http://127.0.0.1:$PORT/api/gitlab/status" | grep -q '"api":'; then
   echo "✓ Done. The JiraTime helper runs in the background and starts by itself at every login."
   echo "  Go back to JiraTime (https://jiratime-by-rocky.netlify.app) → GitLab → Local repos → “Connect this laptop”."
 else

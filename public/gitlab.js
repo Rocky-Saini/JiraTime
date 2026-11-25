@@ -169,7 +169,7 @@ async function gitApi(p, body, { method } = {}) {
   try { r = await fetch((glDirect() ? GL_GIT : GL_BASE) + "/api/git" + p, body !== undefined || method === "POST" ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) } : {}); }
   catch { throw new GlError("The JiraTime helper on this laptop is not answering. Run the one-time setup again (GitLab → Local repos).", 0); }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new GlError(r.status === 404 && (!j.error || j.error === "Not found") ? "The JiraTime helper on this laptop is out of date — run the setup command again (GitLab → Local repos)" : j.error || `Failed (${r.status})`, r.status);
+  if (!r.ok) throw new GlError(r.status === 404 && (!j.error || j.error === "Not found" || j.error === "Unknown git action") ? "The JiraTime helper on this laptop is out of date — run the setup command again (GitLab → Local repos)" : j.error || `Failed (${r.status})`, r.status);
   return j;
 }
 async function glStatusAt(base) {
@@ -286,7 +286,7 @@ async function glProjDetail(p) {
   return job;
 }
 
-const GL_SERVER_API = 2;   // must match API_VERSION in lib/gitlab.js
+const GL_SERVER_API = 3;   // must match API_VERSION in lib/gitlab.js
 /** What this token allows, in plain words. Merging also depends on your role in each project. */
 function glAccessLine(s) {
   if (!s.scopes) return "";

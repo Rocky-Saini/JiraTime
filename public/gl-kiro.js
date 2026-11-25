@@ -45,6 +45,12 @@ function glkSplit(out) {
 // ================= tab =================
 async function glkRenderTab() {
   const body = $("#glBody"); if (!body) return;
+  if (glDirect() && !GL_GIT && GL.helper?.old) {
+    body.innerHTML = `<div class="card gll-hero"><h3>🤖 Update the JiraTime helper</h3><p class="muted">The helper on this laptop is an older version without Kiro. Run this once in a terminal — after that it updates itself:</p>
+      <div class="gl-clone" style="max-width:620px;margin:10px auto"><code>${esc(GL_INSTALL)}</code><button class="small" data-glcopy="${esc(GL_INSTALL)}">Copy</button></div>
+      <button class="small primary-s" data-glact="helperconnect">⟳ Check again</button></div>`;
+    return;
+  }
   if (glDirect() && !GL_GIT) {
     body.innerHTML = `<div class="card gll-hero"><h3>🤖 Kiro on your repositories</h3><p class="muted">Kiro works inside repositories on your laptop, through the JiraTime helper. Set the helper up once in <b>Local repos</b>, then come back.</p><button class="small primary-s" data-glact="tab:local">Go to Local repos</button></div>`;
     return;
