@@ -342,3 +342,9 @@ a.gll-big:hover{border-color:var(--gl);box-shadow:var(--sh)}
 .gllf-ta{flex:1;width:100%;min-height:62vh;resize:vertical;background:var(--bg2);color:var(--tx);border:1px solid var(--bd);border-radius:10px;padding:10px 12px;font:12.5px/1.55 var(--mono);tab-size:2;white-space:pre;overflow:auto}
 .gllf-ta:focus{border-color:var(--acc);outline:none}
 .gll-ask .gll-opts button{white-space:normal}
+/* commit time */
+.ct-badge:not(:empty){display:inline-block;margin-left:6px;min-width:18px;padding:0 6px;border-radius:99px;background:var(--bad);color:#fff;font-size:11px;font-weight:700;line-height:17px;text-align:center}
+.ct-head{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;background:linear-gradient(135deg,rgba(22,163,74,.08),rgba(99,102,241,.06)),var(--card)}
+.ct-hl h3{margin:0 0 4px}.ct-st{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ct-try{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:10px 14px}
+.ct-tbl td small{display:block}

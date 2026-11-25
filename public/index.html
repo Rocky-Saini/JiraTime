@@ -15,6 +15,7 @@
     <button class="nav" data-view="weekly">🗓 Weekly grid</button>
     <button class="nav" data-view="templates">🧩 Templates</button>
     <button class="nav" data-view="automation">⏰ Automation</button>
+    <button class="nav" data-view="committime">⏱ Commit time</button>
     <button class="nav" data-view="fields">📝 Issue fields</button>
     <button class="nav" data-view="ai">🤖 AI efficiency</button>
     <button class="nav" data-view="reports">📊 Reports</button>
@@ -222,6 +223,7 @@
   </section>
 
   <!-- AUTOMATION -->
+  <section id="view-committime" class="view"><div id="ctMain"><p class="muted">Loading…</p></div></section>
   <section id="view-automation" class="view">
     <div class="grid2e">
       <div class="card">
@@ -313,6 +315,7 @@
           <button class="small" data-sec="h-set">12 · Settings &amp; holidays</button>
           <button class="small" data-sec="h-faq">13 · Problems &amp; answers</button>
           <button class="small" data-sec="h-gl">14 · GitLab workspace</button>
+          <button class="small" data-sec="h-ct">15 · Time from commits</button>
         </div>
       </div>
 
@@ -458,6 +461,28 @@
         </ul>
       </div>
 
+      <div class="card" id="h-ct">
+        <h3>15 · Time from commits (⏱ Commit time)</h3>
+        <p>Write how long you worked in the commit message and push as usual — from the terminal, your IDE or JiraTime. JiraTime logs that time on the Jira issue, on the date and time of the commit.</p>
+        <table class="help-tbl"><tr><th>Commit message</th><th>Logs</th></tr>
+          <tr><td><code>FUL2-288698:2hrs fix login</code></td><td>2h on FUL2-288698, comment “fix login — commit abc1234 (project · branch)”</td></tr>
+          <tr><td><code>FUL2-288698-2hrs</code> · <code>FUL2-288698|2hrs</code> · <code>FUL2-288698:2 hrs</code> · <code>FUL2-288698 - 2h</code></td><td>2h</td></tr>
+          <tr><td><code>FUL2-288698: logtime:2</code> · <code>FUL2-288698 time: 2</code> · <code>FUL2-288698:2</code> · <code>FUL2-288698:1.5</code></td><td>2h / 2h / 2h / 1h 30m — a number without unit means hours</td></tr>
+          <tr><td><code>FUL2-288698: 1h 30m</code> · <code>FUL2-288698:1h30m</code> · <code>FUL2-288698:1:30</code> · <code>FUL2-288698 = 90 min</code> · <code>FUL2-288698:45m</code></td><td>1h 30m / … / 45m</td></tr>
+          <tr><td><code>[FUL2-288698] 3 hours refactor</code> · <code>ful2-288698:2h</code> · <code>FUL2-288698:1d</code></td><td>3h / 2h / 8h (1 day = 8 hours)</td></tr>
+          <tr><td><code>FUL2-288698 #time 2h 30m fixed cache</code></td><td>2h 30m (Jira smart-commit style)</td></tr>
+          <tr><td><code>FUL2-1:2h FUL2-2:30m</code></td><td>2h on FUL2-1 and 30m on FUL2-2</td></tr>
+          <tr><td><code>FUL2-288698 2</code> · <code>FUL2-288698-2</code> · <code>FUL2-288698: 2 issues fixed</code> · <code>feat(FUL2-288698): add api</code></td><td>nothing — a bare number needs <code>:</code> <code>|</code> <code>=</code> or a word like <code>logtime</code>, so normal messages are never logged by mistake</td></tr></table>
+        <ul>
+          <li>It checks your GitLab pushes every 5 minutes while JiraTime is open (website or app), and right after you open it — pushes made while JiraTime was closed are picked up then. <b>Catch up</b> buttons read older pushes (1–14 days).</li>
+          <li>Only <b>your own</b> commits are logged (your GitLab / Jira e-mail; add other commit e-mails with <b>⚙ My commit e-mails</b>). Merge commits are ignored.</li>
+          <li>The same commit is never logged twice — also not from a second laptop, a squash or a cherry-pick: JiraTime first looks at the issue's worklogs.</li>
+          <li><b>⚠ Failed time logs</b> lists everything that could not be logged with the reason (issue not found, closed issue, time not understood, more than 16 h, Jira login expired…). Use <b>Retry</b>, <b>Edit</b> (change issue / time) or <b>✕</b> to drop it. The number on the sidebar shows how many are waiting.</li>
+          <li><b>✅ Logged from commits</b> shows what was logged; <b>Undo</b> deletes that worklog. Every entry is also in History &amp; Undo.</li>
+          <li>Use the <b>Try a commit message</b> box to see what a message would log before you push.</li>
+        </ul>
+        <button class="small" data-go="committime">Open Commit time</button>
+      </div>
       <div class="card" id="h-gl">
         <h3>14 · GitLab workspace</h3>
         <p>A separate workspace for your GitLab, with its own connection. Your browser talks to your GitLab directly, so the VPN must be on. Working with folders on your laptop (clone into a folder, commit, push, conflicts) uses the JiraTime helper, which you set up once from <b>GitLab → Local repos</b>.</p>
@@ -576,5 +601,6 @@
 <script src="gl-release.js"></script>
 <script src="gl-ops.js"></script>
 <script src="gl-kiro.js"></script>
+<script src="committime.js"></script>
 </body>
 </html>
