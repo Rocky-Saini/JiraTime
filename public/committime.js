@@ -43,6 +43,15 @@ function ctParse(message) {
     found.push({ key: k.key, secs, raw: msg.slice(k.at, k.end + m[0].length) });
     spans.push([k.end + m[0].match(/^\s*[\])]?/)[0].length, k.end + m[0].length]);
   });
+  // "2h on FUL2-1", "1.5h for FUL2-1", "30m: FUL2-1"
+  const before = new RegExp(`(?:^|[\\s(\\[])(${CT_UNIT_DUR})\\s*(?:on|for|in|to|@|:|\\||-|–)\\s*[\\[(]?$`, "i");
+  keys.forEach((k, i) => {
+    if (found.some((f) => f.key === k.key)) return;
+    const head = msg.slice(i ? keys[i - 1].end : 0, k.at).split("\n").pop(), m = head.match(before); if (!m) return;
+    const secs = ctDur(m[1]); if (!secs) return;
+    const start = k.at - head.length + m.index + (m[0].length - m[0].trimStart().length);
+    found.push({ key: k.key, secs, raw: msg.slice(start, k.end) }); spans.push([start, k.at]);
+  });
   if (!found.length && keys.length) {
     const sm = msg.match(CT_SMART), uniq = [...new Set(keys.map((k) => k.key))];
     if (sm && uniq.length === 1) { found.push({ key: uniq[0], secs: ctDur(sm[1]), raw: sm[0] }); spans.push([sm.index, sm.index + sm[0].length]); }
@@ -79,10 +88,21 @@ function ctBadge() {
   s.textContent = n ? String(n) : ""; s.title = n ? `${n} commit time log(s) failed` : "";
 }
 /** E-mails / names that count as "my" commits. */
+const ctNorm = (s) => String(s || "").toLowerCase().replace(/\(.*?\)/g, "").replace(/[^a-z0-9]/g, "");
 function ctMine() {
   const set = new Set(String(CT.emails || "").split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter(Boolean));
   [GL.st?.user?.email, S.me?.emailAddress, creds.get()?.email].forEach((x) => x && set.add(String(x).toLowerCase()));
-  return { emails: set, names: new Set([GL.st?.user?.name, S.me?.displayName].filter(Boolean).map((x) => x.toLowerCase())) };
+  const names = new Set([GL.st?.user?.name, GL.st?.user?.username, GL.st?.username, S.me?.displayName].map(ctNorm).filter((x) => x.length >= 4));
+  const locals = new Set([...set].map((e) => ctNorm(e.split("@")[0])).filter((x) => x.length >= 4));
+  return { emails: set, names, locals };
+}
+/** Is this commit mine? Same e-mail, the same name ("Rocky-Saini" = "Rocky Saini"), or the same e-mail name on another company domain. */
+function ctIsMine(c, mine = ctMine()) {
+  const em = [c.author_email, c.committer_email].map((x) => String(x || "").toLowerCase());
+  if (em.some((x) => x && mine.emails.has(x))) return "email";
+  if ([c.author_name, c.committer_name].some((n) => mine.names.has(ctNorm(n)))) return "name";
+  if (em.some((x) => x && mine.locals.has(ctNorm(x.split("@")[0])))) return "email name";
+  return "";
 }
 const ctReady = () => !!(creds.get() && S.me && GL.st?.connected);
 
@@ -113,6 +133,15 @@ async function ctScan({ days, manual } = {}) {
     const events = (await glAll(`/events?action=pushed&after=${ymdOf(addDays(from, -1))}&sort=asc`, 10))
       .filter((e) => e.push_data && Date.parse(e.created_at) >= from.getTime());
     if (!GL.projects) await glLoadProjects().catch(() => {});
+    // items skipped by an older version ("only your own commits"): check them again with the current rules
+    for (const x of CT.items.filter((y) => y.status === "skipped" && !y.author && /only your own commits/.test(y.reason))) {
+      const m = x.reason.match(/Commit by (.*?) <([^>]*)>/); if (!m) continue;
+      x.author = m[2];
+      if (!ctIsMine({ author_name: m[1], author_email: m[2] })) continue;
+      const f = ctParse(x.title).found.find((y) => y.key === x.key) || ctParse(x.title).found[0];
+      if (f) Object.assign(x, { key: f.key, secs: f.secs, status: "pending", reason: "" });
+      else Object.assign(x, { reason: `Not logged: no time found in “${x.title}”. Use “Log it anyway” to enter the time.` });
+    }
     const mine = ctMine(), projects = new Map((GL.projects || []).map((p) => [p.id, p]));
     for (const e of events) {
       let commits; try { commits = await ctPushCommits(e); } catch (err) { CT.msg = `Could not read a push in project ${e.project_id}: ${err.message}`; continue; }
@@ -120,12 +149,18 @@ async function ctScan({ days, manual } = {}) {
         if (!c?.id || CT.seen[c.id]) continue;
         CT.seen[c.id] = Date.now();
         if ((c.parent_ids || []).length > 1) continue;                         // merge commits carry other people's messages
-        const isMine = mine.emails.has(String(c.author_email || "").toLowerCase()) || mine.emails.has(String(c.committer_email || "").toLowerCase()) || mine.names.has(String(c.author_name || "").toLowerCase());
+        const isMine = !!ctIsMine(c, mine);
         const p = ctParse(c.message || c.title);
-        if (!p.found.length && !p.unclear) continue;
+        if (!p.keys.length) continue;                                              // no Jira issue in the message: nothing to do
         const pr = projects.get(e.project_id), base = { sha: c.id, short: c.short_id || c.id.slice(0, 8), pid: e.project_id, project: pr?.path || String(e.project_id),
           branch: e.push_data.ref || "", title: c.title || "", at: c.authored_date || c.created_at, web: c.web_url || "", foundAt: new Date().toISOString(), clean: p.clean };
-        if (!isMine) { CT.items.push({ ...base, id: uid(), key: p.found[0]?.key || p.keys[0] || "", secs: p.found[0]?.secs || 0, status: "skipped", reason: `Commit by ${c.author_name} <${c.author_email}> — only your own commits are logged (add your commit e-mail in settings if this is you)` }); continue; }
+        if (!isMine) {
+          if (!p.found.length && !p.unclear) continue;
+          CT.items.push({ ...base, id: uid(), key: p.found[0]?.key || p.keys[0] || "", secs: p.found[0]?.secs || 0, status: "skipped", author: c.author_email || "",
+            reason: `Not logged: the commit was made by ${c.author_name} <${c.author_email}>, which does not match you (${[...mine.emails].join(", ") || "no e-mail known"}). If it is you, press “Log it anyway” — JiraTime will remember this e-mail.` });
+          continue;
+        }
+        if (!p.found.length && !p.unclear) { CT.items.push({ ...base, id: uid(), key: p.keys[0], secs: 0, status: "skipped", reason: `Not logged: the message mentions ${p.keys.join(", ")} but no time. Write it like ${p.keys[0]}:2h to log time.` }); continue; }
         if (!p.found.length) { CT.items.push({ ...base, id: uid(), key: p.keys[0], secs: 0, status: "failed", reason: "The message mentions time, but JiraTime could not read it. Use e.g. KEY:2h, KEY-30m or KEY|1.5h." }); added++; failed++; continue; }
         for (const f of p.found) { CT.items.push({ ...base, id: uid(), key: f.key, secs: f.secs, raw: f.raw, status: "pending", reason: "" }); added++; }
       }
@@ -171,6 +206,25 @@ async function ctLog(it) {
 }
 /** Worklog comment text: the commit title without the issue key and the time. */
 const ctText = (clean, key, title) => { const t = String(clean || "").replace(new RegExp(`(^|\\s)[\\[(]?${key}[\\])]?(?=\\s|$|[,:;])`, "ig"), " ").replace(/^[\s:|\-–,]+|[\s:|\-–,]+$/g, "").replace(/\s{2,}/g, " ").trim(); return t || title || key; };
+/** In-app form: Jira issue + time. Resolves { key, secs } or null. */
+function ctEditDlg(it) {
+  return new Promise((resolve) => {
+    openModal(`<div class="ct-edit"><h3>✎ Log this commit</h3><p class="muted tiny">${esc(it.title)}<br>${esc(it.project)} · <code class="sha">${esc(it.short)}</code> · ${esc(fmtDateTime(it.at))}</p>
+      <div class="form"><label>Jira issue <input id="ctEK" value="${esc(it.key || "")}" placeholder="FUL2-123" style="text-transform:uppercase"></label>
+        <label>Time <input id="ctET" value="${it.secs ? esc(secsToDur(it.secs)) : ""}" placeholder="2h · 1h 30m · 45m · 1.5"></label><p id="ctEE" class="st-failed tiny"></p></div>
+      <div class="foot"><button id="ctEC">Cancel</button><button id="ctEO" class="primary">Log time</button></div></div>`);
+    const done = (v) => { closeModal(); resolve(v); };
+    const go = () => {
+      const key = $("#ctEK").value.trim().toUpperCase(), t = $("#ctET").value.trim(), secs = ctDur(t) || parseDuration(t);
+      if (!/^[A-Z][A-Z0-9_]{1,9}-\d{1,7}$/.test(key)) { $("#ctEE").textContent = "Type a Jira key like FUL2-123"; return; }
+      if (!secs) { $("#ctEE").textContent = "Time not understood — e.g. 2h, 1h 30m, 45m"; return; }
+      done({ key, secs });
+    };
+    $("#ctEC").onclick = () => done(null); $("#ctEO").onclick = go;
+    ["#ctEK", "#ctET"].forEach((s) => $(s).addEventListener("keydown", (e) => { if (e.key === "Enter") go(); }));
+    setTimeout(() => (it.key ? $("#ctET") : $("#ctEK")).focus(), 30);
+  });
+}
 function ctFail(it, reason) { Object.assign(it, { status: "failed", reason, failedAt: new Date().toISOString() }); return false; }
 
 // ================= page =================
@@ -212,24 +266,36 @@ async function ctAct(act, id) {
   if (act.startsWith("tab:")) { CT.tab = act.slice(4); ctSave(); return ctDraw(); }
   if (act === "settings") {
     const auto = [...ctMine().emails].join(", ");
-    const v = prompt(`E-mails your git commits use (comma separated).\nAlready included: ${auto || "—"}\n\nAdd e.g. a personal e-mail you commit with:`, CT.emails || "");
-    if (v != null) { CT.emails = v; ctSave(); toast("Saved"); }
-    return;
+    const v = await uiPrompt(`Commits made with these e-mails count as yours. Already included: ${auto || "—"}\n\nAdd other e-mails you commit with (comma separated):`, CT.emails || "", { title: "My commit e-mails", ok: "Save" });
+    if (v == null) return;
+    CT.emails = v; const mine = ctMine(); let n = 0;
+    for (const x of CT.items) if (x.status === "skipped" && x.author && mine.emails.has(x.author.toLowerCase()) && x.secs) { Object.assign(x, { status: "pending", reason: "" }); n++; }
+    ctSave(); toast(n ? `Saved — logging ${n} skipped commit(s) now` : "Saved");
+    if (n && ctReady()) { for (const x of CT.items.filter((y) => y.status === "pending")) await ctLog(x); ctSave(); }
+    return ctDraw();
   }
   if (act === "retryall") { if (!ctReady()) return toast("Connect Jira and GitLab first"); for (const x of ctFailed()) { if (x.secs) x.status = "pending"; } CT.busy = true; ctDraw(); let ok = 0; for (const x of CT.items.filter((y) => y.status === "pending")) { if (await ctLog(x)) ok++; ctSave(); if (x.stop) break; } CT.busy = false; ctSave(); ctDraw(); return toast(`${ok} logged`); }
   if (!it) return;
   if (act === "retry") { if (!it.secs) return ctAct("edit", id); if (!ctReady()) return toast("Connect Jira and GitLab first"); await ctLog(it); ctSave(); ctDraw(); return toast(it.status === "logged" ? `Logged ${secsToDur(it.secs)} on ${it.key}` : it.status === "skipped" ? it.reason : "Still failing: " + it.reason); }
   if (act === "edit") {
-    const key = prompt("Jira issue:", it.key || ""); if (!key) return;
-    const dur = prompt("Time (e.g. 2h, 1h 30m, 45m):", it.secs ? secsToDur(it.secs) : ""); if (!dur) return;
-    const secs = ctDur(dur) || parseDuration(dur);
-    if (!secs) return toast("Time not understood");
+    const v = await ctEditDlg(it); if (!v) return;
+    const { key, secs } = v;
     Object.assign(it, { key: key.trim().toUpperCase(), secs }); await ctLog(it); ctSave(); ctDraw(); return;
   }
   if (act === "dismiss") { Object.assign(it, { status: "skipped", reason: "Dismissed by you" }); ctSave(); return ctDraw(); }
-  if (act === "force") { Object.assign(it, { status: "failed", reason: "Waiting for retry" }); if (!it.secs) return ctAct("edit", id); await ctLog(it); ctSave(); return ctDraw(); }
+  if (act === "force") {
+    if (it.author && !ctMine().emails.has(it.author.toLowerCase()) && await uiConfirm(`Treat all commits from ${it.author} as yours from now on?`, { title: "Remember this e-mail?", ok: "Yes, it is me", cancel: "Only this commit", danger: false })) {
+      CT.emails = [CT.emails, it.author].filter(Boolean).join(", ");
+      for (const x of CT.items) if (x !== it && x.status === "skipped" && x.author && x.author.toLowerCase() === it.author.toLowerCase() && x.secs) Object.assign(x, { status: "pending", reason: "" });
+    }
+    Object.assign(it, { status: "failed", reason: "Waiting for retry" });
+    if (!it.secs) return ctAct("edit", id);
+    await ctLog(it);
+    for (const x of CT.items.filter((y) => y.status === "pending")) await ctLog(x);
+    ctSave(); ctDraw(); return toast(it.status === "logged" ? `Logged ${secsToDur(it.secs)} on ${it.key}` : it.reason);
+  }
   if (act === "undo") {
-    if (!confirm(`Delete the ${secsToDur(it.secs)} worklog on ${it.key} in Jira?`)) return;
+    if (!await uiConfirm(`Delete the ${secsToDur(it.secs)} worklog on ${it.key} in Jira?`, { title: "Undo this time log?", ok: "Delete worklog" })) return;
     try { await jira(API.delWorklog(it.issueId, it.worklogId), { method: "DELETE" }); Object.assign(it, { status: "skipped", reason: "Undone by you (worklog deleted)" }); ctSave(); ctDraw(); toast("Worklog deleted"); reloadMonths([it.date.slice(0, 7)]).then(() => renderAll()).catch(() => {}); }
     catch (e) { toast(e.message); }
   }

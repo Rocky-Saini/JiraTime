@@ -268,14 +268,14 @@ async function gllShowDiff() {
   } catch (e) { box.innerHTML = `<div class="warnbox">${esc(e.message)}</div>`; }
 }
 async function gllFileAct(act, file, staged) {
-  if (act === "discard" && !confirm(`Discard all changes in ${file}?\n\nA backup copy is saved in ~/.config/jiratime/backups first.`)) return;
+  if (act === "discard" && !await uiConfirm(`Discard all changes in ${file}?\n\nA backup copy is saved in ~/.config/jiratime/backups first.`)) return;
   const r = await gllDo(act === "stage" ? "Stage" : act === "unstage" ? "Unstage" : "Discard", () => gitApi(`/${act}`, { repo: GLLS.cur, paths: [file] }), { quiet: act !== "discard" });
   if (r) { if (r.backup) toast(`Discarded — backup in ${r.backup}`); GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; if (act !== "discard") { GLLS.sel = file; GLLS.selStaged = act === "stage"; } gllRenderRepo(); }
   void staged;
 }
 async function gllHunkAct(j, mode) {
   const f = GLLS.diffFiles?.[0]; if (!f) return;
-  if (mode === "discard" && !confirm("Discard this hunk? A backup copy of the file is saved first.")) return;
+  if (mode === "discard" && !await uiConfirm("Discard this hunk? A backup copy of the file is saved first.")) return;
   const r = await gllDo(mode === "stage" ? "Stage hunk" : mode === "unstage" ? "Unstage hunk" : "Discard hunk", () => gitApi("/apply", { repo: GLLS.cur, mode, patch: GLD.hunkPatch(f, f.hunks[j]) }), { quiet: true });
   if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; gllRenderRepo(); }
 }
@@ -295,7 +295,7 @@ async function gllSuggest() {
 async function gllCommit(push) {
   const msg = $("#gllMsg").value.trim(), amend = $("#gllAmend").checked;
   if (!msg) { toast("Write a commit message"); $("#gllMsg").focus(); return; }
-  if (amend && !confirm("Amend the last commit? Only do this if it was not pushed yet.")) return;
+  if (amend && !await uiConfirm("Amend the last commit? Only do this if it was not pushed yet.")) return;
   const r = await gllDo("Commit", () => gitApi("/commit", { repo: GLLS.cur, message: msg, amend }));
   if (!r) return;
   GLLS.msg = ""; GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() };
@@ -303,7 +303,7 @@ async function gllCommit(push) {
 }
 async function gllPush() {
   const st = gllSt();
-  if (!st.upstream && !confirm(`Push the new branch "${st.branch}" to GitLab?`)) return;
+  if (!st.upstream && !await uiConfirm(`Push the new branch "${st.branch}" to GitLab?`)) return;
   const r = await gllDo("Push", () => gitApi("/push", { repo: GLLS.cur }));
   if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; gllRenderRepo(); gllAfterPush(); }
 }
@@ -596,7 +596,7 @@ async function gllfUpload(list) {
   if (!list.length) return;
   const big = list.filter((x) => x.f.size > 25 * 1048576); if (big.length) toast(`Skipped ${big.length} file(s) over 25 MB`);
   const ok = list.filter((x) => x.f.size <= 25 * 1048576 && !/(^|\/)\.git(\/|$)/.test(x.rel));
-  if (ok.length > 300 && !confirm(`Upload ${ok.length} files into ${GLLF.dir || "the repository root"}?`)) return;
+  if (ok.length > 300 && !await uiConfirm(`Upload ${ok.length} files into ${GLLF.dir || "the repository root"}?`)) return;
   let done = 0, failed = [], exists = [];
   GLLS.busy = `Uploading 0 / ${ok.length}`; gllBusy();
   await pool(ok, 3, async (x) => {
@@ -605,7 +605,7 @@ async function gllfUpload(list) {
     catch (e) { if (e.status === 409) exists.push(x); else failed.push(`${x.rel}: ${e.message}`); }
     GLLS.busy = `Uploading ${++done} / ${ok.length}`; gllBusy();
   });
-  if (exists.length && confirm(`${exists.length} file(s) already exist (${exists.slice(0, 3).map((x) => x.rel).join(", ")}${exists.length > 3 ? "…" : ""}). Replace them? A backup is kept.`)) {
+  if (exists.length && await uiConfirm(`${exists.length} file(s) already exist (${exists.slice(0, 3).map((x) => x.rel).join(", ")}${exists.length > 3 ? "…" : ""}). Replace them? A backup is kept.`)) {
     await pool(exists, 3, async (x) => { const rel = x.rel.split("/"), name = rel.pop(); try { await gitApi("/file/upload", { repo: GLLS.cur, dir: gllfJoin(GLLF.dir, ...rel), name, data: await gllfB64(x.f), overwrite: true }); } catch (e) { failed.push(`${x.rel}: ${e.message}`); } });
   }
   GLLS.busy = ""; gllBusy();
@@ -613,7 +613,7 @@ async function gllfUpload(list) {
   gllfList(); gllStatus(GLLS.cur).then(() => gllFillList()).catch(() => {});
 }
 async function gllfOpen(p) {
-  if (GLLF.dirty && GLLF.file !== p && !confirm(`Discard your unsaved edits in ${GLLF.file}?`)) return;
+  if (GLLF.dirty && GLLF.file !== p && !await uiConfirm(`Discard your unsaved edits in ${GLLF.file}?`)) return;
   GLLF.file = p; GLLF.dirty = false;
   document.querySelectorAll("#gllfList [data-gllfile]").forEach((x) => x.classList.toggle("on", x.dataset.gllfile === p));
   const ed = $("#gllfEd"); if (!ed) return;
@@ -640,11 +640,11 @@ Object.assign(GL_ACTIONS, {
   gllrefresh: () => { GLLS.st = {}; gllRenderTab(); },
   glladd: async () => { const d = await gllPickFolder(GLLS.lastDest, { title: "Choose a folder that is a git repository", allowRepo: true, button: "Add this repository" }); if (!d) return; const r = await gllDo("Add repository", () => gitApi("/repos/add", { path: d })); if (r) { await gllLoad(true); gllOpenRepo(r.repo.id); } },
   gllscan: async () => { const d = await gllPickFolder(GLLS.lastDest, { title: "Find git repositories inside…", allowRepo: true, button: "Scan this folder" }); if (!d) return; const r = await gllDo("Scan", () => gitApi("/scan", { root: d }), { quiet: true }); if (r) { toast(`Found ${r.added.length} repositor${r.added.length === 1 ? "y" : "ies"}`); GLLS.repos = r.repos; gllRenderTab(); } },
-  gllremove: async (id) => { if (!confirm("Remove this repository from JiraTime? The folder is NOT deleted.")) return; await gitApi("/repos/remove", { repo: id }); GLLS.cur = null; await gllLoad(true); gllRenderTab(); },
+  gllremove: async (id) => { if (!await uiConfirm("Remove this repository from JiraTime? The folder is NOT deleted.")) return; await gitApi("/repos/remove", { repo: id }); GLLS.cur = null; await gllLoad(true); gllRenderTab(); },
   gllfetch: async () => { const r = await gllDo("Fetch", () => gitApi("/fetch", { repo: GLLS.cur })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; gllRenderRepo(); } },
-  gllpull: () => {
+  gllpull: async () => {
     const st = gllSt();
-    if (st.files.some((f) => !f.untracked) && !confirm("You have uncommitted changes. Pull anyway? (Git stops if they would be overwritten; stash or commit first to be safe.)")) return;
+    if (st.files.some((f) => !f.untracked) && !await uiConfirm("You have uncommitted changes. Pull anyway? (Git stops if they would be overwritten; stash or commit first to be safe.)")) return;
     openModal(`<h3>⬇ Pull ${esc(st.branch)}</h3><p class="muted tiny">How should GitLab's new commits be combined with yours?</p>
       <div class="gll-opts"><button class="primary-s small" data-glact="gllpullgo:ff">Fast-forward only (safest)</button><button class="small" data-glact="gllpullgo:merge">Merge</button><button class="small" data-glact="gllpullgo:rebase">Rebase my commits on top</button></div>
       <div class="foot"><button data-glact="closedet">Cancel</button></div>`);
@@ -657,26 +657,26 @@ Object.assign(GL_ACTIONS, {
   gllbranchmenu: () => { GLLS.sub = "branches"; gllRenderRepo(); },
   gllnewbranch: async () => {
     const name = $("#gllBn").value.trim(), from = $("#gllBf").value; if (!name) { toast("Type a branch name"); return; }
-    const st = gllSt(); if (st.files.length && !confirm("You have uncommitted changes. They are carried over to the new branch. Continue?")) return;
+    const st = gllSt(); if (st.files.length && !await uiConfirm("You have uncommitted changes. They are carried over to the new branch. Continue?")) return;
     const r = await gllDo(`Create ${name}`, () => gitApi("/checkout", { repo: GLLS.cur, branch: name, create: true, from })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; GLLS.sub = "changes"; gllRenderRepo(); }
   },
-  gllbranchat: async (sha) => { const name = prompt("New branch name (created at this commit):"); if (!name) return; const r = await gllDo(`Create ${name}`, () => gitApi("/checkout", { repo: GLLS.cur, branch: name.trim(), create: true, from: sha })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; gllRenderRepo(); } },
+  gllbranchat: async (sha) => { const name = await uiPrompt("New branch name (created at this commit):"); if (!name) return; const r = await gllDo(`Create ${name}`, () => gitApi("/checkout", { repo: GLLS.cur, branch: name.trim(), create: true, from: sha })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; gllRenderRepo(); } },
   gllcheckout: async (name) => { await gllSwitch(GLLS.cur, name); gllRenderRepo(); },
   gllcheckoutr: async (name) => { await gllSwitch(GLLS.cur, name, { remote: true }); gllRenderRepo(); },
   gllcompare: (name) => gllCompare(name),
-  gllmergein: async (name) => { const st = gllSt(); if (!confirm(`Merge ${name} into ${st.branch}?`)) return; const r = await gllDo(`Merge ${name}`, () => gitApi("/merge", { repo: GLLS.cur, branch: name })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; if (r.conflicts) { GLLS.sub = "conflicts"; toast("Merge has conflicts — resolve them"); } gllRenderRepo(); } },
-  gllrebaseon: async (name) => { const st = gllSt(); if (!confirm(`Rebase ${st.branch} onto ${name}?\n\nYour commits are replayed on top of ${name}. If ${st.branch} was already pushed you would need a force push, which JiraTime does not do.`)) return; const r = await gllDo(`Rebase onto ${name}`, () => gitApi("/rebase", { repo: GLLS.cur, onto: name })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; if (r.conflicts) GLLS.sub = "conflicts"; gllRenderRepo(); } },
-  gllrename: async (name) => { const to = prompt(`Rename ${name} to:`, name); if (!to || to === name) return; const r = await gllDo("Rename branch", () => gitApi("/branch/rename", { repo: GLLS.cur, from: name, to: to.trim() })); if (r) gllRenderRepo(); },
+  gllmergein: async (name) => { const st = gllSt(); if (!await uiConfirm(`Merge ${name} into ${st.branch}?`)) return; const r = await gllDo(`Merge ${name}`, () => gitApi("/merge", { repo: GLLS.cur, branch: name })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; if (r.conflicts) { GLLS.sub = "conflicts"; toast("Merge has conflicts — resolve them"); } gllRenderRepo(); } },
+  gllrebaseon: async (name) => { const st = gllSt(); if (!await uiConfirm(`Rebase ${st.branch} onto ${name}?\n\nYour commits are replayed on top of ${name}. If ${st.branch} was already pushed you would need a force push, which JiraTime does not do.`)) return; const r = await gllDo(`Rebase onto ${name}`, () => gitApi("/rebase", { repo: GLLS.cur, onto: name })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; if (r.conflicts) GLLS.sub = "conflicts"; gllRenderRepo(); } },
+  gllrename: async (name) => { const to = await uiPrompt(`Rename ${name} to:`, name); if (!to || to === name) return; const r = await gllDo("Rename branch", () => gitApi("/branch/rename", { repo: GLLS.cur, from: name, to: to.trim() })); if (r) gllRenderRepo(); },
   glldelbranch: async (name) => {
-    if (!confirm(`Delete the local branch ${name}?`)) return;
+    if (!await uiConfirm(`Delete the local branch ${name}?`)) return;
     try { await gitApi("/branch/delete", { repo: GLLS.cur, name }); toast(`Deleted ${name}`); gllRenderRepo(); }
-    catch (e) { if (/not fully merged/i.test(e.message) && confirm(`${name} has commits that are not merged anywhere. Delete anyway? Those commits can be lost.`)) { await gllDo("Delete branch", () => gitApi("/branch/delete", { repo: GLLS.cur, name, force: true })); gllRenderRepo(); } else if (!/not fully merged/i.test(e.message)) gllError("Delete branch", e.message); }
+    catch (e) { if (/not fully merged/i.test(e.message) && await uiConfirm(`${name} has commits that are not merged anywhere. Delete anyway? Those commits can be lost.`)) { await gllDo("Delete branch", () => gitApi("/branch/delete", { repo: GLLS.cur, name, force: true })); gllRenderRepo(); } else if (!/not fully merged/i.test(e.message)) gllError("Delete branch", e.message); }
   },
-  glldelremote: async (name) => { const short = name.replace(/^origin\//, ""); if (prompt(`This deletes the branch on GitLab for everyone.\nType the branch name to confirm:\n${short}`) !== short) return; const r = await gllDo(`Delete ${short} on GitLab`, () => gitApi("/branch/delete", { repo: GLLS.cur, name, remote: true })); if (r) gllRenderRepo(); },
+  glldelremote: async (name) => { const short = name.replace(/^origin\//, ""); if (await uiPrompt(`This deletes the branch on GitLab for everyone.\nType the branch name to confirm:\n${short}`) !== short) return; const r = await gllDo(`Delete ${short} on GitLab`, () => gitApi("/branch/delete", { repo: GLLS.cur, name, remote: true })); if (r) gllRenderRepo(); },
   glllog: () => { Object.assign(GLLS.logF, { grep: $("#gllLg").value.trim(), author: $("#gllLa").value.trim(), since: $("#gllLs").value, until: $("#gllLu").value, all: $("#gllLall").checked }); GLLS.commit = null; gllHistory(gllSt()); },
   glllogmore: () => gllHistory(gllSt(), true),
-  gllrevert: async (sha) => { if (!confirm(`Create a new commit that undoes ${sha.slice(0, 8)}?`)) return; const r = await gllDo("Revert", () => gitApi("/revert", { repo: GLLS.cur, sha })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; if (r.conflicts) GLLS.sub = "conflicts"; GLLS.commit = null; gllRenderRepo(); } },
-  glltag: async (sha) => { const name = prompt("Tag name (e.g. v1.9.0):"); if (!name) return; const push = confirm("Also push the tag to GitLab?"); const r = await gllDo(`Tag ${name}`, () => gitApi("/tag", { repo: GLLS.cur, name: name.trim(), sha, message: name.trim(), push })); if (r) gllRenderRepo(); },
+  gllrevert: async (sha) => { if (!await uiConfirm(`Create a new commit that undoes ${sha.slice(0, 8)}?`)) return; const r = await gllDo("Revert", () => gitApi("/revert", { repo: GLLS.cur, sha })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; if (r.conflicts) GLLS.sub = "conflicts"; GLLS.commit = null; gllRenderRepo(); } },
+  glltag: async (sha) => { const name = await uiPrompt("Tag name (e.g. v1.9.0):"); if (!name) return; const push = await uiConfirm("Also push the tag to GitLab?", { title: "Push the tag?", ok: "Push it too", cancel: "Only on this laptop", danger: false }); const r = await gllDo(`Tag ${name}`, () => gitApi("/tag", { repo: GLLS.cur, name: name.trim(), sha, message: name.trim(), push })); if (r) gllRenderRepo(); },
   gllreset: (sha) => {
     openModal(`<h3>Reset ${esc(gllSt().branch)} to ${sha.slice(0, 8)}</h3>
       <div class="gll-opts"><button class="small" data-glact="gllresetgo:soft|${sha}">Soft — keep changes staged</button><button class="small" data-glact="gllresetgo:mixed|${sha}">Mixed — keep changes unstaged</button>
@@ -684,12 +684,12 @@ Object.assign(GL_ACTIONS, {
       <p class="muted tiny">Commits after this one disappear from the branch. If they were pushed, GitLab still has them, and pushing would need a force push (not offered).</p>
       <div class="foot"><button data-glact="closedet">Cancel</button></div>`);
   },
-  gllresetgo: async (arg) => { const [mode, sha] = arg.split("|"); if (mode === "hard" && !confirm("Hard reset? Uncommitted changes are moved to a stash backup first.")) return; closeModal(); const r = await gllDo(`Reset --${mode}`, () => gitApi("/reset", { repo: GLLS.cur, mode, sha })); if (r) { if (r.backup) toast(`Your changes were saved in ${r.backup}`); GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; GLLS.commit = null; gllRenderRepo(); } },
+  gllresetgo: async (arg) => { const [mode, sha] = arg.split("|"); if (mode === "hard" && !await uiConfirm("Hard reset? Uncommitted changes are moved to a stash backup first.")) return; closeModal(); const r = await gllDo(`Reset --${mode}`, () => gitApi("/reset", { repo: GLLS.cur, mode, sha })); if (r) { if (r.backup) toast(`Your changes were saved in ${r.backup}`); GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; GLLS.commit = null; gllRenderRepo(); } },
   gllstashpush: async () => { const r = await gllDo("Stash", () => gitApi("/stash/push", { repo: GLLS.cur, message: $("#gllSm").value || "JiraTime stash" })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; gllRenderRepo(); } },
-  gllstash: async (arg) => { const [op, ref] = arg.split("|"); if (op === "drop" && !confirm(`Drop ${ref}? Its changes are lost.`)) return; const r = await gllDo(`Stash ${op}`, () => gitApi(`/stash/${op}`, { repo: GLLS.cur, ref })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; if (r.conflicts) GLLS.sub = "conflicts"; gllRenderRepo(); } },
-  gllabort: async () => { const st = gllSt(); if (!confirm(`Abort the ${st.state}? Everything goes back to how it was before it started.`)) return; const r = await gllDo(`Abort ${st.state}`, () => gitApi("/abort", { repo: GLLS.cur })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; GLLS.cfChoice = {}; GLLS.sub = "changes"; gllRenderRepo(); } },
-  gllcontinue: async () => { const st = gllSt(); if (!confirm(`Finish the ${st.state} now? A commit is created with the resolved files.`)) return; const r = await gllDo(`Continue ${st.state}`, () => gitApi("/continue", { repo: GLLS.cur })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; GLLS.cfChoice = {}; GLLS.sub = "history"; GLLS.commit = null; gllRenderRepo(); toast("Done — review, then Push when ready"); } },
-  gllcftake: async (side) => { const f = GLLS.cf.files[GLLS.cfIdx]; if (!confirm(`Use the whole ${side === "ours" ? "current" : "incoming"} version of ${f.path}?`)) return; const r = await gllDo("Resolve", () => gitApi("/resolve", { repo: GLLS.cur, path: f.path, take: side })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; delete GLLS.cfChoice[f.path]; gllRenderRepo(); } },
+  gllstash: async (arg) => { const [op, ref] = arg.split("|"); if (op === "drop" && !await uiConfirm(`Drop ${ref}? Its changes are lost.`)) return; const r = await gllDo(`Stash ${op}`, () => gitApi(`/stash/${op}`, { repo: GLLS.cur, ref })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; if (r.conflicts) GLLS.sub = "conflicts"; gllRenderRepo(); } },
+  gllabort: async () => { const st = gllSt(); if (!await uiConfirm(`Abort the ${st.state}? Everything goes back to how it was before it started.`)) return; const r = await gllDo(`Abort ${st.state}`, () => gitApi("/abort", { repo: GLLS.cur })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; GLLS.cfChoice = {}; GLLS.sub = "changes"; gllRenderRepo(); } },
+  gllcontinue: async () => { const st = gllSt(); if (!await uiConfirm(`Finish the ${st.state} now? A commit is created with the resolved files.`)) return; const r = await gllDo(`Continue ${st.state}`, () => gitApi("/continue", { repo: GLLS.cur })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; GLLS.cfChoice = {}; GLLS.sub = "history"; GLLS.commit = null; gllRenderRepo(); toast("Done — review, then Push when ready"); } },
+  gllcftake: async (side) => { const f = GLLS.cf.files[GLLS.cfIdx]; if (!await uiConfirm(`Use the whole ${side === "ours" ? "current" : "incoming"} version of ${f.path}?`)) return; const r = await gllDo("Resolve", () => gitApi("/resolve", { repo: GLLS.cur, path: f.path, take: side })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; delete GLLS.cfChoice[f.path]; gllRenderRepo(); } },
   gllcfsave: async () => {
     const f = GLLS.cf.files[GLLS.cfIdx], blocks = gllParseConflicts(f.work), n = blocks.filter((b) => b.t === "conflict").length, ch = GLLS.cfChoice[f.path];
     const content = gllJoin(blocks, Array.from({ length: n }, (_, k) => ch[k]));
@@ -705,7 +705,7 @@ Object.assign(GL_ACTIONS, {
   },
   gllkiro: () => { window.GLKIRO?.setRepo(GLLS.cur); glGo("kiro"); },
   gllfnew: async (kind) => {
-    const name = prompt(kind === "folder" ? "New folder name (you can use a/b/c):" : "New file name (e.g. notes.md or src/util/Helper.java):"); if (!name) return;
+    const name = await uiPrompt(kind === "folder" ? "New folder name (you can use a/b/c):" : "New file name (e.g. notes.md or src/util/Helper.java):"); if (!name) return;
     const p = gllfJoin(GLLF.dir, name.trim().replace(/^\/+/, ""));
     try {
       if (kind === "folder") { await gitApi("/file/mkdir", { repo: GLLS.cur, path: p }); GLLF.dir = p; toast("Folder created (git shows it once it contains a file)"); gllfList(); }
@@ -715,10 +715,10 @@ Object.assign(GL_ACTIONS, {
   gllfsave: async () => {
     const ta = $("#gllfTa"); if (!ta || !GLLF.file) return;
     try { const r = await gitApi("/file/write", { repo: GLLS.cur, path: GLLF.file, content: ta.value, at: ta.dataset.at }); ta.dataset.at = r.at; GLLF.dirty = false; $("#gllfSt").textContent = "✓ saved"; gllStatus(GLLS.cur).then(() => gllFillList()).catch(() => {}); }
-    catch (e) { if (e.status === 409 && confirm(e.message + "\n\nOverwrite it with your version anyway? (a backup is kept)")) { ta.dataset.at = ""; glAction("gllfsave"); } else if (e.status !== 409) toast(e.message); }
+    catch (e) { if (e.status === 409 && await uiConfirm(e.message + "\n\nOverwrite it with your version anyway? (a backup is kept)")) { ta.dataset.at = ""; glAction("gllfsave"); } else if (e.status !== 409) toast(e.message); }
   },
-  gllfren: async () => { const to = prompt("New name:", GLLF.file.split("/").pop()); if (!to) return; try { const r = await gitApi("/file/rename", { repo: GLLS.cur, from: GLLF.file, to: to.trim() }); GLLF.file = r.path; gllfList(); gllfOpen(r.path); } catch (e) { toast(e.message); } },
-  gllfdel: async () => { if (!confirm(`Delete ${GLLF.file}? A backup copy is kept in ~/.config/jiratime/backups.`)) return; try { await gitApi("/file/delete", { repo: GLLS.cur, path: GLLF.file }); toast("Deleted"); GLLF.file = null; GLLF.dirty = false; gllFiles(); } catch (e) { toast(e.message); } },
+  gllfren: async () => { const to = await uiPrompt("New name:", GLLF.file.split("/").pop()); if (!to) return; try { const r = await gitApi("/file/rename", { repo: GLLS.cur, from: GLLF.file, to: to.trim() }); GLLF.file = r.path; gllfList(); gllfOpen(r.path); } catch (e) { toast(e.message); } },
+  gllfdel: async () => { if (!await uiConfirm(`Delete ${GLLF.file}? A backup copy is kept in ~/.config/jiratime/backups.`)) return; try { await gitApi("/file/delete", { repo: GLLS.cur, path: GLLF.file }); toast("Deleted"); GLLF.file = null; GLLF.dirty = false; gllFiles(); } catch (e) { toast(e.message); } },
   gllfkiro: () => { const f = GLLF.file; window.GLKIRO?.setRepo(GLLS.cur); window.GLKIRO?.prefill(`About the file ${f}: `); glGo("kiro"); },
   gllsub: (s) => { closeModal(); GLLS.sub = s; gllRenderRepo(); },
   glltpl: () => {

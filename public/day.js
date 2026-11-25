@@ -82,7 +82,7 @@ async function saveEntry(date, e, hours, comment, btn, newDate = date) {
     if (holidayOf(newDate)) warn.push(`it is marked as ${holidayOf(newDate).type} (${holidayOf(newDate).label})`);
     if (newDate > todayStr()) warn.push("it is in the future");
     if (there + secs > S.settings.target * 3600) warn.push(`that day would have ${fmtH(there + secs)} (more than ${S.settings.target}h)`);
-    if (!confirm(`Move ${fmtH(secs)} on ${e.issueKey} from ${prettyDate(date)} to ${prettyDate(newDate)}?` + (warn.length ? `\n\nNote: ${warn.join("; ")}.` : ""))) return;
+    if (!await uiConfirm(`Move ${fmtH(secs)} on ${e.issueKey} from ${prettyDate(date)} to ${prettyDate(newDate)}?` + (warn.length ? `\n\nNote: ${warn.join("; ")}.` : ""))) return;
   }
   btn.disabled = true; btn.textContent = moving ? "Moving…" : "Saving…";
   try {
@@ -99,7 +99,7 @@ async function saveEntry(date, e, hours, comment, btn, newDate = date) {
 }
 
 async function deleteEntry(date, e) {
-  if (!confirm(`Delete ${fmtH(e.secs)} on ${e.issueKey} (${prettyDate(date)}) from Jira?`)) return;
+  if (!await uiConfirm(`Delete ${fmtH(e.secs)} on ${e.issueKey} (${prettyDate(date)}) from Jira?`)) return;
   try {
     await jira(API.delWorklog(e.issueId, e.id), { method: "DELETE" });
   } catch (err) { if (err.status !== 404) { toast("Delete failed: " + err.message); return; } }

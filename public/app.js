@@ -24,6 +24,30 @@ function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.re
 function openModal(html) { $("#modalBox").innerHTML = html; $("#modal").classList.remove("hidden"); }
 function closeModal() { $("#modal").classList.add("hidden"); }
 const modalOpen = () => !$("#modal").classList.contains("hidden");
+// ================= in-app dialogs (instead of the browser's confirm / prompt) =================
+/** Shows a JiraTime dialog above everything (also above an open modal). Resolves with true/false, or the typed text / null. */
+function uiDialog({ title = "", message = "", input = null, value = "", placeholder = "", ok = "OK", cancel = "Cancel", danger = false, match = "" } = {}) {
+  return new Promise((resolve) => {
+    let box = document.getElementById("uiDlg");
+    if (!box) { box = document.createElement("div"); box.id = "uiDlg"; box.className = "ui-dlg hidden"; document.body.appendChild(box); }
+    const lines = String(message || "").split("\n\n");
+    box.innerHTML = `<div class="ui-dlg-box" role="dialog" aria-modal="true">${title ? `<h3>${esc(title)}</h3>` : ""}
+      ${lines.map((l) => `<p>${esc(l).replace(/\n/g, "<br>")}</p>`).join("")}
+      ${input ? `<input id="uiDlgIn" type="text" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off">` : ""}
+      <div class="ui-dlg-foot">${cancel ? `<button id="uiDlgNo">${esc(cancel)}</button>` : ""}<button id="uiDlgOk" class="${danger ? "danger-s" : "primary-s"}">${esc(ok)}</button></div></div>`;
+    box.classList.remove("hidden");
+    const inp = $("#uiDlgIn", box), okB = $("#uiDlgOk", box);
+    const done = (v) => { box.classList.add("hidden"); document.removeEventListener("keydown", key, true); resolve(v); };
+    const accept = () => { if (input) { const v = inp.value.trim(); if (match && v !== match) { inp.classList.add("bad"); inp.focus(); return; } done(v || null); } else done(true); };
+    const key = (e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(input ? null : false); } else if (e.key === "Enter" && (input || document.activeElement === okB || !box.contains(document.activeElement))) { e.preventDefault(); e.stopPropagation(); accept(); } };
+    document.addEventListener("keydown", key, true);
+    okB.onclick = accept; const no = $("#uiDlgNo", box); if (no) no.onclick = () => done(input ? null : false);
+    box.onmousedown = (e) => { if (e.target === box) done(input ? null : false); };
+    setTimeout(() => (inp ? (inp.focus(), inp.select()) : okB.focus()), 20);
+  });
+}
+const uiConfirm = (message, opts = {}) => uiDialog({ title: opts.title || "Please confirm", message, ok: opts.ok || "Yes, continue", danger: opts.danger ?? /delete|discard|drop|remove|reset|abort|close|revoke|clear|overwrite|replace|lost/i.test(message), cancel: opts.cancel ?? "Cancel" });
+const uiPrompt = (message, value = "", opts = {}) => uiDialog({ title: opts.title || "", message, input: true, value, placeholder: opts.placeholder || "", ok: opts.ok || "OK", match: opts.match || "" });
 
 // ================= small event bus (lets the add-on modules react) =================
 const JT = {
@@ -983,7 +1007,7 @@ function renderHistory() {
   $("#batches").innerHTML = list.map(([id, hs]) => `<div class="li"><span><b>${new Date(hs[0].ts).toLocaleString()}</b> — ${hs.length} worklogs, ${esc([...new Set(hs.map((h) => h.issueKey))].join(", "))}, ${fmtH(hs.reduce((a, h) => a + parseDuration(h.duration), 0))}</span><button class="small danger" data-undobatch="${id}">Undo batch</button></div>`).join("") || '<p class="muted">No undoable batches.</p>';
 }
 async function undoEntries(list, label) {
-  if (!list.length || !confirm(`Delete ${list.length} worklog(s) from Jira (${label})? This cannot be undone.`)) return;
+  if (!list.length || !await uiConfirm(`Delete ${list.length} worklog(s) from Jira (${label})? This cannot be undone.`)) return;
   let ok = 0, fail = 0;
   for (const h of list) {
     try { await jira(API.delWorklog(h.issueId, h.worklogId), { method: "DELETE" }); h.deleted = true; ok++; }
@@ -1112,7 +1136,7 @@ async function init() {
   $("#repPrint").onclick = printTimesheet;
   $("#histFilter").oninput = renderHistory; $("#histStatus").onchange = renderHistory;
   $("#histCsv").onclick = () => download("jiratime-history.csv", csv([["time", "date", "issue", "duration", "comment", "status", "error", "worklogId"], ...S.history.map((h) => [h.ts, h.date, h.issueKey, h.duration, h.comment, h.status, h.error, h.worklogId])]));
-  $("#histClear").onclick = async () => { if (confirm("Clear local history? (Undo for these entries will no longer be possible)")) { S.history = []; await store.set("history", []); renderHistory(); } };
+  $("#histClear").onclick = async () => { if (await uiConfirm("Clear local history? (Undo for these entries will no longer be possible)")) { S.history = []; await store.set("history", []); renderHistory(); } };
   $("#view-history").addEventListener("click", (e) => {
     const u = e.target.closest("[data-undo]"), b = e.target.closest("[data-undobatch]");
     if (u) undoEntries(S.history.filter((h) => h.id === u.dataset.undo), "1 entry");

@@ -247,18 +247,18 @@ window.JTT = {
     renderRows(); renderSelection(); renderSuggestion();
     if (!t.issue) toast(`“${t.name}” has no Jira issue yet — pick one in the row (or on the Templates page)`);
   };
-  $("#tplSave").onclick = () => {
+  $("#tplSave").onclick = async () => {
     const r = S.rows.find((x) => x.issue && parseDuration(x.duration)) || S.rows[0];
     if (!r || (!r.issue && !r.comment)) { toast("Fill a row first (issue, hours, comment)"); return; }
-    const name = prompt("Template name?", (r.comment || r.issue?.key || "My template").slice(0, 40)); if (!name) return;
+    const name = await uiPrompt("Template name?", (r.comment || r.issue?.key || "My template").slice(0, 40)); if (!name) return;
     addTemplate({ cat: "My templates", name, issue: r.issue ? { id: String(r.issue.id), key: r.issue.key, summary: r.issue.summary || "" } : null, duration: r.duration, comment: r.comment });
     toast("Template saved (Templates page)");
   };
   $("#planSel").onchange = (e) => { const p = pGet(e.target.value); e.target.value = ""; if (p) planToRows(p); };
-  $("#planSave").onclick = () => {
+  $("#planSave").onclick = async () => {
     const valid = S.rows.filter((r) => r.issue && parseDuration(r.duration));
     if (!valid.length) { toast("Pick at least one issue first"); return; }
-    const name = prompt("Day plan name?", "My day"); if (!name) return;
+    const name = await uiPrompt("Day plan name?", "My day"); if (!name) return;
     addPlan({ name, items: valid.map((r) => ({ tid: templateForRow(r).id, duration: r.duration })) });
     toast("Day plan saved — set its weekdays on the Templates page");
   };
@@ -291,10 +291,10 @@ window.JTT = {
     if (e.target.classList.contains("tcat")) { t.cat = e.target.value; tSave(true); renderTplPage(); }
     if (e.target.classList.contains("tq") && !e.target.value.trim()) { t.issue = null; tSave(true); renderTplPage(); }
   });
-  tl.addEventListener("click", (e) => {
+  tl.addEventListener("click", async (e) => {
     if (!e.target.classList.contains("tdel")) return;
     const t = tGet(e.target.closest(".tcard").dataset.t), used = TT.plans.filter((p) => p.items.some((it) => it.tid === t.id));
-    if (!confirm(`Delete “${t.name}”?${used.length ? ` It is also removed from ${used.length} day plan(s).` : ""}`)) return;
+    if (!await uiConfirm(`Delete “${t.name}”?${used.length ? ` It is also removed from ${used.length} day plan(s).` : ""}`)) return;
     TT.templates = TT.templates.filter((x) => x !== t);
     used.forEach((p) => { p.items = p.items.filter((it) => it.tid !== t.id); });
     tSave(true); renderTplPage();
@@ -323,7 +323,7 @@ window.JTT = {
   pl.addEventListener("click", async (e) => {
     const b = e.target.closest("button"); if (!b) return;
     const p = planOf(b); if (!p) return;
-    if (b.classList.contains("pdel")) { if (!confirm(`Delete day plan “${p.name}”?`)) return; TT.plans = TT.plans.filter((x) => x !== p); tSave(true); renderTplPage(); }
+    if (b.classList.contains("pdel")) { if (!await uiConfirm(`Delete day plan “${p.name}”?`)) return; TT.plans = TT.plans.filter((x) => x !== p); tSave(true); renderTplPage(); }
     else if (b.classList.contains("prm")) { p.items.splice(+b.closest(".pitem").dataset.i, 1); tSave(true); renderTplPage(); }
     else if (b.classList.contains("dchip")) { const d = +b.dataset.dow, days = p.days || []; setPlanDays(p, days.includes(d) ? days.filter((x) => x !== d) : [...days, d]); tSave(true); renderTplPage(); }
     else if (b.classList.contains("puse")) planOnDates(p, sortedSelected());

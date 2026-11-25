@@ -331,11 +331,11 @@ Object.assign(GL_ACTIONS, {
   glperr: () => document.querySelector("#glpPre .ll.err")?.scrollIntoView({ block: "center" }),
   glpretry: async (jid) => {
     const c = GLP.cur, j = c.jobs.find((x) => x.id === +jid);
-    if (!confirm(`Run the job "${j?.name}" again?\n\nIt runs with the same commit and settings. Deploy jobs really deploy again.`)) return;
+    if (!await uiConfirm(`Run the job "${j?.name}" again?\n\nIt runs with the same commit and settings. Deploy jobs really deploy again.`)) return;
     try { const n = (await glApi(`/projects/${c.pid}/jobs/${jid}/retry`, { method: "POST" })).data; toast("Job restarted"); c.job = n?.id || null; glpOpen(c.pid, c.id); } catch (e) { toast(e.message); }
   },
   glpretrypipe: async () => {
-    const c = GLP.cur; if (!confirm(`Retry all failed jobs of pipeline #${c.id}?`)) return;
+    const c = GLP.cur; if (!await uiConfirm(`Retry all failed jobs of pipeline #${c.id}?`)) return;
     try { await glApi(`/projects/${c.pid}/pipelines/${c.id}/retry`, { method: "POST" }); toast("Failed jobs restarted"); c.job = null; glpOpen(c.pid, c.id); } catch (e) { toast(e.message); }
   },
   glasrc: (s) => { GLA.src = s; GLA.list = null; glaRenderTab(); },

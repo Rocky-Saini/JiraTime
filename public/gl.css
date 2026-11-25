@@ -348,3 +348,11 @@ a.gll-big:hover{border-color:var(--gl);box-shadow:var(--sh)}
 .ct-hl h3{margin:0 0 4px}.ct-st{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .ct-try{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:10px 14px}
 .ct-tbl td small{display:block}
+/* in-app confirm / prompt */
+.ui-dlg{position:fixed;inset:0;z-index:90;background:rgba(5,7,12,.55);backdrop-filter:blur(4px);display:flex;align-items:flex-start;justify-content:center;padding-top:16vh;animation:glFade .12s}
+.ui-dlg.hidden{display:none}
+.ui-dlg-box{width:min(480px,92vw);background:var(--bg2);border:1px solid var(--bd);border-radius:16px;padding:20px 22px;box-shadow:0 30px 80px rgba(0,0,0,.5);animation:glIn .15s}
+.ui-dlg-box h3{margin:0 0 10px;font-size:16px}.ui-dlg-box p{margin:0 0 10px;font-size:13.5px;line-height:1.5;word-break:break-word}
+.ui-dlg-box input{width:100%;margin:4px 0 6px}.ui-dlg-box input.bad{border-color:var(--bad)}
+.ui-dlg-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+button.danger-s{background:var(--bad);border:0;color:#fff;font-weight:600}

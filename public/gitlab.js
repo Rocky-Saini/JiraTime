@@ -676,7 +676,7 @@ async function glAction(act) {
   if (act === "more") { GL.f.limit += 100; return glFillProjects(); }
   if (act === "closedet") { GL.abort?.abort(); return closeModal(); }
   if (act === "disconnect") {
-    if (!confirm("Disconnect GitLab? The token is removed from this laptop and the saved GitLab data is cleared.")) return;
+    if (!await uiConfirm("Disconnect GitLab? The token is removed from this laptop and the saved GitLab data is cleared.")) return;
     if (glDirect()) glCreds.clear();
     else await fetch(GL_BASE + "/api/gitlab/disconnect", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
     glResetData(); GL.st = await glStatus(); GL.view = null; toast("GitLab disconnected"); glPill(); return glRender();

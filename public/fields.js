@@ -205,7 +205,7 @@ async function fdDatesFromWorklogs() {
 function fdRenderPresets() { $("#fdPreset").innerHTML = '<option value="">Presets…</option>' + FD.presets.map((p, i) => `<option value="${i}">${esc(p.name)} (${Object.keys(p.values).length})</option>`).join(""); }
 async function fdPresetSave() {
   const entries = Object.entries(FD.edits); if (!entries.length) { toast("Change some fields first, then save them as a preset"); return; }
-  const name = prompt("Preset name?", "AI used – Kiro"); if (!name) return;
+  const name = await uiPrompt("Preset name?", "AI used – Kiro"); if (!name) return;
   FD.presets.push({ name, values: Object.fromEntries(entries.map(([k, v]) => [FD.fields.find((f) => f.key === k).name, v])) });
   await store.set("fdPresets", FD.presets); fdRenderPresets(); toast("Preset saved");
 }

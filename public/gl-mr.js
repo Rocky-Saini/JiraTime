@@ -393,9 +393,9 @@ Object.assign(GL_ACTIONS, {
   glmedit: () => glmEdit(),
   glmmerge: () => glmMergeDlg(),
   glmapprove: async () => { const c = GLMS.cur; try { await glApi(`/projects/${c.pid}/merge_requests/${c.iid}/approve`, { method: "POST", body: { sha: c.mr.sha } }); toast("Approved ✔"); glmReload(); } catch (e) { toast(e.message); } },
-  glmunapprove: async () => { const c = GLMS.cur; if (!confirm("Revoke your approval?")) return; try { await glApi(`/projects/${c.pid}/merge_requests/${c.iid}/unapprove`, { method: "POST" }); toast("Approval revoked"); glmReload(); } catch (e) { toast(e.message); } },
+  glmunapprove: async () => { const c = GLMS.cur; if (!await uiConfirm("Revoke your approval?")) return; try { await glApi(`/projects/${c.pid}/merge_requests/${c.iid}/unapprove`, { method: "POST" }); toast("Approval revoked"); glmReload(); } catch (e) { toast(e.message); } },
   glmdraft: async () => { const c = GLMS.cur, m = c.mr, d = glmIsDraft(m); try { await glApi(`/projects/${c.pid}/merge_requests/${c.iid}`, { method: "PUT", body: { title: d ? glmStripDraft(m.title) : "Draft: " + glmStripDraft(m.title) } }); toast(d ? "Marked as ready" : "Marked as draft"); glmReload(); } catch (e) { toast(e.message); } },
-  glmstate: async (ev) => { const c = GLMS.cur; if (ev === "close" && !confirm(`Close !${c.iid} without merging?`)) return; try { await glApi(`/projects/${c.pid}/merge_requests/${c.iid}`, { method: "PUT", body: { state_event: ev } }); toast(ev === "close" ? "Closed" : "Reopened"); glmReload(); } catch (e) { toast(e.message); } },
+  glmstate: async (ev) => { const c = GLMS.cur; if (ev === "close" && !await uiConfirm(`Close !${c.iid} without merging?`)) return; try { await glApi(`/projects/${c.pid}/merge_requests/${c.iid}`, { method: "PUT", body: { state_event: ev } }); toast(ev === "close" ? "Closed" : "Reopened"); glmReload(); } catch (e) { toast(e.message); } },
   glmnote: async () => {
     const c = GLMS.cur, ta = $("#glmNote"), body = ta?.value.trim(); if (!body) return;
     ta.disabled = true;
