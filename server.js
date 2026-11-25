@@ -73,7 +73,7 @@ http.createServer(async (req, res) => {
       req.headers["sec-fetch-site"] = "same-origin";          // trusted hosted JiraTime: treat like this page
     }
     if (url.pathname.startsWith("/api/git/")) {
-      const body = req.method === "POST" ? await readBody(req, 6_000_000) : undefined;
+      const body = req.method === "POST" ? await readBody(req, 15_000_000) : undefined;
       const r = await localgit.handle({ method: req.method, path: url.pathname, query: url.search.slice(1), body, headers: req.headers });
       if (r) return send(res, r.status, r.body, "application/json", { ...r.headers, ...cors });
     }

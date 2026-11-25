@@ -2,7 +2,7 @@
 /* 🤖 Kiro tab: chat with Kiro CLI inside a repository on this laptop (analysis, code review, explanations, edits).
    Kiro runs through the JiraTime helper with the user's own Kiro login. Conversations continue per repository. */
 
-const GLK2 = { repo: localStorage.getItem("jiratime.kiro.repo") || "", mode: "ask", st: null, job: null, poll: null, branches: null };
+const GLK2 = { repo: localStorage.getItem("jiratime.kiro.repo") || "", mode: "ask", st: null, job: null, poll: null, branches: null, att: [], prefill: "" };
 const glkHist = {
   key: (id) => "jiratime.kiro.chat." + id,
   get(id) { try { return JSON.parse(localStorage.getItem(this.key(id)) || "[]"); } catch { return []; } },
@@ -76,13 +76,23 @@ async function glkRenderTab() {
       <button class="small" data-glact="glkreview:local">🔍 Review my changes</button><button class="small" data-glact="glknew" title="Start a fresh conversation">＋ New chat</button></div>
     <div class="card glk-chat"><div id="glkLog" class="glk-log"></div>
       <div class="glk-quick">${GLK_QUICK.map(([l], i) => `<button class="small ghost" data-glact="glkquick:${i}">${esc(l)}</button>`).join("")}</div>
-      <div class="glk-in"><textarea id="glkQ" rows="3" placeholder="Ask Kiro about this repository… (Enter = send, Shift+Enter = new line)"></textarea>
+      <div id="glkAtt" class="glk-att"></div>
+      <div class="glk-in"><label class="glk-clip" title="Attach screenshots, images or documents (PDF, Word, Excel, text, logs…)">📎<input type="file" id="glkFile" multiple hidden accept="image/*,.pdf,.docx,.xlsx,.pptx,.txt,.md,.log,.json,.csv,.xml,.yml,.yaml,.properties,.sql,.java,.js,.ts,.py,.html,.har,.diff,.patch"></label>
+        <textarea id="glkQ" rows="3" placeholder="Ask Kiro about this repository… Paste a screenshot with Ctrl+V or drop files here. (Enter = send, Shift+Enter = new line)"></textarea>
         <div class="glk-send"><button class="primary" id="glkGo" style="width:auto;margin:0">Send</button><button class="small danger hidden" id="glkStop">■ Stop</button></div></div>
       <p class="muted tiny glk-note">Runs Kiro CLI on this laptop inside the repository with your Kiro login. ${GLK2.mode === "edit" ? "<b>Kiro may change files</b> — check them in Local repos → Changes before you commit." : "Read only: Kiro cannot change files."} Kiro never runs shell / git commands from here.</p></div></div>`;
-  $("#glkRepo").onchange = (e) => { GLK2.repo = e.target.value; localStorage.setItem("jiratime.kiro.repo", GLK2.repo); glkRenderTab(); };
+  $("#glkRepo").onchange = (e) => { GLK2.att = []; GLK2.repo = e.target.value; localStorage.setItem("jiratime.kiro.repo", GLK2.repo); glkRenderTab(); };
   $("#glkGo").onclick = () => glkSend();
   $("#glkStop").onclick = () => GLK2.job && gitApi("/kiro/stop", { id: GLK2.job.id }).catch(() => {});
   $("#glkQ").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); glkSend(); } });
+  if (GLK2.prefill) { $("#glkQ").value = GLK2.prefill; GLK2.prefill = ""; setTimeout(() => { const q = $("#glkQ"); q?.focus(); q?.setSelectionRange(q.value.length, q.value.length); }, 30); }
+  $("#glkFile").onchange = (e) => { glkAddFiles([...e.target.files]); e.target.value = ""; };
+  $("#glkQ").addEventListener("paste", (e) => { const files = [...(e.clipboardData?.items || [])].filter((i) => i.kind === "file").map((i) => i.getAsFile()).filter(Boolean); if (files.length) { e.preventDefault(); glkAddFiles(files.map((f, i) => (f.name && f.name !== "image.png" ? f : new File([f], `screenshot-${new Date().toISOString().slice(11, 19).replace(/:/g, "")}${i ? "-" + i : ""}.${(f.type.split("/")[1] || "png").replace("jpeg", "jpg")}`, { type: f.type })))); } });
+  const chat = $(".glk-chat");
+  chat.addEventListener("dragover", (e) => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); chat.classList.add("drag"); } });
+  chat.addEventListener("dragleave", (e) => { if (!chat.contains(e.relatedTarget)) chat.classList.remove("drag"); });
+  chat.addEventListener("drop", (e) => { e.preventDefault(); chat.classList.remove("drag"); glkAddFiles([...e.dataTransfer.files]); });
+  glkAttDraw();
   glkBranches(); glkDraw();
   const act = await gitApi(`/kiro/active?repo=${GLK2.repo}`).catch(() => null);      // re-attach to a running answer
   if (act?.job) glkAttach(act.job);
@@ -96,10 +106,11 @@ async function glkBranches() {
     sel.dataset.cur = st.branch; sel.dataset.dirty = st.files.filter((f) => !f.untracked).length;
     sel.onchange = async () => {
       const [k, name] = [sel.value.slice(0, 1), sel.value.slice(2)];
-      if (+sel.dataset.dirty && !confirm(`You have uncommitted changes on ${sel.dataset.cur}. Git keeps them if they do not clash, otherwise it refuses. Switch to ${name}?`)) { glkBranches(); return; }
-      try { await gitApi("/checkout", k === "R" ? { repo: GLK2.repo, branch: name, remote: true } : { repo: GLK2.repo, branch: name }); toast(`Switched to ${name.replace(/^origin\//, "")}`); glkSys(`Switched to branch ${name.replace(/^origin\//, "")}`); }
-      catch (e) { toast(e.message); }
-      glkBranches();
+      sel.disabled = true;
+      const st = await GLL.switchBranch(GLK2.repo, name, { remote: k === "R" }).catch((e) => { toast(e.message); return null; });
+      if (st) glkSys(`Switched to branch ${st.branch} and pulled the latest${st.state ? ` — ${st.state} in progress, resolve it in Local repos` : ""}`);
+      if (GL.tab !== "kiro") return;
+      sel.disabled = false; glkBranches();
     };
   } catch (e) { sel.innerHTML = `<option>${esc(e.message.slice(0, 40))}</option>`; }
 }
@@ -109,7 +120,7 @@ function glkDraw() {
   const h = glkHist.get(GLK2.repo);
   el.innerHTML = h.map((m) => {
     if (m.role === "sys") return `<div class="glk-sys">— ${esc(m.text)} —</div>`;
-    if (m.role === "user") return `<div class="glk-m me"><div class="glk-b">${m.label ? `<span class="b skip">${esc(m.label)}</span> ` : ""}${esc(m.text.length > 600 ? m.text.slice(0, 600) + "…" : m.text)}</div></div>`;
+    if (m.role === "user") return `<div class="glk-m me"><div class="glk-b">${m.label ? `<span class="b skip">${esc(m.label)}</span> ` : ""}${esc(m.text.length > 600 ? m.text.slice(0, 600) + "…" : m.text)}${m.files?.length ? `<div class="glk-mf">${m.files.map((f) => f.thumb ? `<img src="${esc(f.thumb)}" alt="${esc(f.name)}" title="${esc(f.name)}">` : `<span class="glk-fc">${f.kind === "image" ? "🖼" : "📄"} ${esc(f.name)}</span>`).join("")}</div>` : ""}</div></div>`;
     const sp = glkSplit(m.out || ""), live = m.live;
     return `<div class="glk-m ai"><div class="glk-av">🤖</div><div class="glk-b">
       ${sp.activity.length ? `<details class="glk-act" ${live && !sp.answer ? "open" : ""}><summary>${live ? '<span class="spin"></span> ' : ""}${sp.activity.filter((x) => /using tool/.test(x)).length} step${sp.activity.filter((x) => /using tool/.test(x)).length === 1 ? "" : "s"} — files Kiro looked at</summary><div>${sp.activity.slice(-80).map((x) => `<div>${esc(x)}</div>`).join("")}</div></details>` : live ? '<div class="muted tiny"><span class="spin"></span> Kiro is thinking…</div>' : ""}
@@ -122,11 +133,14 @@ function glkDraw() {
 async function glkSend(text, opts = {}) {
   const q = text ?? $("#glkQ")?.value.trim(); if (!q) return;
   if (GLK2.job) { toast("Kiro is still answering — wait or press Stop"); return; }
+  if (GLK2.att.some((a) => a.busy)) { toast("Wait until the attachments are uploaded"); return; }
+  const att = opts.review ? [] : GLK2.att.filter((a) => a.id);
   const fresh = opts.fresh ?? !!GLK2.fresh; GLK2.fresh = false;       // first message after "New chat"
   try {
-    const job = opts.review ? await gitApi("/kiro/review", { repo: GLK2.repo, ...opts.review }) : await gitApi("/kiro/ask", { repo: GLK2.repo, prompt: q, mode: GLK2.mode, fresh });
+    const job = opts.review ? await gitApi("/kiro/review", { repo: GLK2.repo, ...opts.review }) : await gitApi("/kiro/ask", { repo: GLK2.repo, prompt: q, mode: GLK2.mode, fresh, attachments: att.map((a) => a.id) });
+    if (att.length) { GLK2.att = []; glkAttDraw(); }
     if ($("#glkQ") && text == null) $("#glkQ").value = "";
-    const h = glkHist.get(GLK2.repo); h.push({ role: "user", text: q, label: opts.label || (GLK2.mode === "edit" ? "may edit" : ""), at: Date.now() }); glkHist.set(GLK2.repo, h);
+    const h = glkHist.get(GLK2.repo); h.push({ role: "user", text: q, label: opts.label || (GLK2.mode === "edit" ? "may edit" : ""), files: att.map((a) => ({ name: a.name, kind: a.kind, thumb: a.thumb || "" })), at: Date.now() }); glkHist.set(GLK2.repo, h);
     glkAttach(job);
   } catch (e) { toast(e.message); }
 }
@@ -157,6 +171,34 @@ async function glkForProject(p, review) {
   if (review) { await sleep(400); if (GL.tab === "kiro") glkSend(review.text, { review: review.body, label: review.label }); }
 }
 
+// ================= attachments =================
+/** Small JPEG preview kept in the chat history (data URL, ~10 KB). */
+const glkThumb = (file) => new Promise((res) => {
+  if (!/^image\//.test(file.type)) return res("");
+  const img = new Image(), url = URL.createObjectURL(file);
+  img.onload = () => { const s = Math.min(1, 220 / Math.max(img.width, img.height)), c = document.createElement("canvas"); c.width = Math.max(1, img.width * s); c.height = Math.max(1, img.height * s); c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url); res(c.toDataURL("image/jpeg", 0.7)); };
+  img.onerror = () => { URL.revokeObjectURL(url); res(""); };
+  img.src = url;
+});
+async function glkAddFiles(files) {
+  for (const f of files.slice(0, 10)) {
+    if (f.size > 10 * 1048576) { toast(`${f.name}: larger than 10 MB`); continue; }
+    if (GLK2.att.length >= 10) { toast("At most 10 attachments per message"); break; }
+    const a = { key: Math.random().toString(36).slice(2), name: f.name || "file", kind: /^image\//.test(f.type) ? "image" : "file", busy: true, thumb: await glkThumb(f) };
+    GLK2.att.push(a); glkAttDraw();
+    try { const r = await gitApi("/kiro/attach", { repo: GLK2.repo, name: a.name, data: await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(",")[1] || ""); fr.onerror = () => rej(fr.error); fr.readAsDataURL(f); }) });
+      Object.assign(a, { id: r.id, kind: r.kind, busy: false, note: r.kind === "file" && /\.(pdf|docx|xlsx|pptx)$/i.test(a.name) ? "could not extract text" : "" }); }
+    catch (e) { a.busy = false; a.err = e.message; }
+    glkAttDraw();
+  }
+}
+function glkAttDraw() {
+  const el = $("#glkAtt"); if (!el) return;
+  el.innerHTML = GLK2.att.map((a) => `<span class="glk-chip ${a.err ? "bad" : ""}" title="${esc(a.err || a.note || a.name)}">${a.thumb ? `<img src="${esc(a.thumb)}" alt="">` : a.kind === "image" ? "🖼" : "📄"}<span>${esc(a.name)}</span>${a.busy ? '<span class="spin"></span>' : a.err ? "⚠" : a.kind === "document" ? '<span class="muted tiny">text read</span>' : ""}<button type="button" data-glkrm="${a.key}" title="Remove">×</button></span>`).join("");
+  el.classList.toggle("hidden", !GLK2.att.length);
+}
+document.addEventListener("click", (e) => { const b = e.target.closest("[data-glkrm]"); if (!b) return; GLK2.att = GLK2.att.filter((a) => a.key !== b.dataset.glkrm); glkAttDraw(); });
+
 Object.assign(GL_ACTIONS, {
   glkrecheck: async () => { await gitApi("/kiro/status?force=1").catch(() => {}); glkRenderTab(); },
   glkmode: (m) => { GLK2.mode = m; glkRenderTab(); },
@@ -174,4 +216,4 @@ document.addEventListener("click", (e) => {
   const m = glkHist.get(GLK2.repo)[+b.dataset.glkcopy]; if (m) navigator.clipboard.writeText(glkSplit(m.out).answer).then(() => toast("Copied")).catch(() => toast("Copy failed"));
 });
 glAddTab({ id: "kiro", icon: "🤖", label: "Kiro", render: () => glkRenderTab(), refresh: () => {} }, "local");
-window.GLKIRO = { forProject: glkForProject, setRepo: (id) => { GLK2.repo = id; localStorage.setItem("jiratime.kiro.repo", id); } };
+window.GLKIRO = { forProject: glkForProject, setRepo: (id) => { if (GLK2.repo !== id) GLK2.att = []; GLK2.repo = id; localStorage.setItem("jiratime.kiro.repo", id); }, prefill: (t) => { GLK2.prefill = t; } };

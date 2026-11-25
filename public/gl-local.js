@@ -193,7 +193,7 @@ function gllFillList() {
 }
 
 // ================= repository workspace =================
-const GLL_SUB = [["changes", "Changes"], ["history", "History"], ["branches", "Branches"], ["stash", "Stashes"], ["conflicts", "Conflicts"]];
+const GLL_SUB = [["changes", "Changes"], ["files", "Files"], ["history", "History"], ["branches", "Branches"], ["stash", "Stashes"], ["conflicts", "Conflicts"]];
 async function gllRenderRepo() {
   const main = $("#gllMain"); if (!main) return;
   const repo = gllRepo();
@@ -222,7 +222,7 @@ async function gllRenderRepo() {
       <span class="grow"></span><span class="muted tiny">${st.last ? `last commit ${esc(ago(st.last.at))} · ${esc(st.last.author)}` : "no commits yet"}${st.upstream ? ` · tracking ${esc(st.upstream)}` : st.detached ? " · detached HEAD" : " · not pushed yet"}</span></div>
     <div id="gllSub"></div>`;
   gllFillList();
-  ({ changes: gllChanges, history: gllHistory, branches: gllBranches, stash: gllStash, conflicts: gllConflicts }[GLLS.sub] || gllChanges)(st);
+  ({ changes: gllChanges, files: gllFiles, history: gllHistory, branches: gllBranches, stash: gllStash, conflicts: gllConflicts }[GLLS.sub] || gllChanges)(st);
 }
 const gllSt = () => GLLS.st[GLLS.cur];
 async function gllReload() { await gllStatus(GLLS.cur).catch(() => {}); return gllRenderRepo(); }
@@ -490,6 +490,148 @@ async function gllConflicts(st) {
         <button class="primary" data-glact="gllcfsave" ${confs.length && Object.keys(ch).length === confs.length ? "" : "disabled"}>✓ Mark resolved</button></div></div></div>`;
 }
 
+// ================= switch branch: stash if needed, then pull the latest from GitLab =================
+/** Modal with choice buttons; resolves with the chosen key (or "cancel"). */
+function gllAsk(title, html, choices) {
+  return new Promise((resolve) => {
+    openModal(`<div class="gll-ask"><h3>${esc(title)}</h3><div>${html}</div><div class="gll-opts">${choices.map(([k, l, cls]) => `<button class="small ${cls || ""}" data-ask="${esc(k)}">${l}</button>`).join("")}</div></div>`);
+    $("#modalBox").querySelectorAll("[data-ask]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); closeModal(); resolve(b.dataset.ask); }, { once: true }));
+  });
+}
+/** Switch repo to branch, keep uncommitted work safe (stash or carry), then bring it up to date with GitLab.
+    Conflicts open the conflict studio. Returns the new status, or null when the user cancelled / it failed. */
+async function gllSwitch(repoId, name, { remote = false } = {}) {
+  const short = name.replace(/^origin\//, "");
+  let st = await gitApi(`/status?repo=${repoId}`), stashed = false;
+  const dirty = st.files.filter((f) => !f.untracked && !f.conflict).length;
+  if (st.state) { toast(`Finish or abort the ${st.state} first`); return null; }
+  const stash = async () => { await gitApi("/stash/push", { repo: repoId, message: `JiraTime: before switching ${st.branch} → ${short}` }); stashed = true; };
+  if (dirty) {
+    const c = await gllAsk(`Switch to ${short}`, `<p>You have <b>${dirty}</b> uncommitted change${dirty === 1 ? "" : "s"} on <b>${esc(st.branch)}</b>.</p>`,
+      [["stash", "📦 Stash them (safe) and switch — get them back later in Stashes", "primary-s"], ["carry", "Bring them along to " + esc(short)], ["cancel", "Cancel"]]);
+    if (c === "cancel") return null;
+    if (c === "stash") { try { await stash(); } catch (e) { toast(e.message); return null; } }
+  }
+  const checkout = () => gitApi("/checkout", remote ? { repo: repoId, branch: name, remote: true } : { repo: repoId, branch: name });
+  try { st = await checkout(); }
+  catch (e) {
+    if (!/overwritten|commit your changes|stash them|untracked working tree files/i.test(e.message)) { gllError(`Switch to ${short}`, e.message); return null; }
+    const c = await gllAsk(`Your changes clash with ${short}`, `<pre class="gl-out">${esc(e.message.split("\n").slice(0, 8).join("\n"))}</pre>`, [["stash", "📦 Stash my changes and switch", "primary-s"], ["cancel", "Stay on " + esc(st.branch)]]);
+    if (c !== "stash") return null;
+    try { await stash(); st = await checkout(); } catch (e2) { gllError(`Switch to ${short}`, e2.message); return null; }
+  }
+  GLLS.st[repoId] = { ...st, at: Date.now() };
+  if (st.upstream) {
+    try {
+      const r = await gitApi("/pull", { repo: repoId, mode: "ff" }); st = r.status;
+      toast(/up.to.date/i.test(r.output || "") ? `On ${short} — already up to date` : `On ${short} — pulled the latest from GitLab`);
+    } catch (e) {
+      if (/fast-forward|diverg/i.test(e.message)) {
+        const c = await gllAsk(`${short} has new commits on GitLab and on this laptop`, "<p>Both sides have commits the other does not have. How should they be combined?</p>",
+          [["merge", "⤵ Merge GitLab's commits into mine", "primary-s"], ["rebase", "Rebase my commits on top of GitLab's"], ["leave", "Leave it for now"]]);
+        if (c !== "leave") {
+          try {
+            const r = await gitApi("/pull", { repo: repoId, mode: c }); st = r.status;
+            if (r.conflicts) {
+              const d = await gllAsk("Conflicts", `<p>Some files were changed on both sides. Resolve them now, or undo the ${c}.</p>`, [["resolve", "🧩 Resolve conflicts", "primary-s"], ["abort", `Undo the ${c}`, "danger"]]);
+              if (d === "abort") st = await gitApi("/abort", { repo: repoId });
+              else { GLLS.sub = "conflicts"; gllOpenRepo(repoId); GLLS.sub = "conflicts"; gllRenderRepo(); }
+            } else toast(`${short} is up to date (${c})`);
+          } catch (e2) { gllError("Pull", e2.message); }
+        }
+      } else toast(`Switched to ${short}, but pulling failed: ${e.message.split("\n").pop().slice(0, 140)}`);
+    }
+  } else toast(`Switched to ${short} (not on GitLab yet, nothing to pull)`);
+  if (stashed) toast(`Switched to ${short}. Your changes are saved in Stashes.`);
+  GLLS.st[repoId] = { ...st, at: Date.now() };
+  return st;
+}
+
+// ================= Files: browse, create, upload, edit =================
+const GLLF = { dir: "", file: null, dirty: false };
+function gllFiles() {
+  const box = $("#gllSub"); if (!box) return;
+  box.innerHTML = `<div class="gll-split gllf"><div class="card gllf-l" id="gllfDrop">
+      <div class="gllf-crumbs" id="gllfCrumbs"></div>
+      <div class="gllf-bar"><button class="small" data-glact="gllfnew:file">＋ File</button><button class="small" data-glact="gllfnew:folder">＋ Folder</button>
+        <label class="small gllf-up">⬆ Files<input type="file" multiple id="gllfUp" hidden></label><label class="small gllf-up">⬆ Folder<input type="file" webkitdirectory id="gllfUpD" hidden></label></div>
+      <div id="gllfList" class="gllf-list"><p class="muted tiny">Loading…</p></div>
+      <p class="muted tiny" style="margin:6px 2px 0">Drop files or folders here to upload into this folder.</p></div>
+    <div class="card gllf-r" id="gllfEd"><div class="gll-hero"><p class="muted">Pick a file to view or edit it, or create a new one.</p></div></div></div>`;
+  $("#gllfUp").onchange = (e) => gllfUpload([...e.target.files].map((f) => ({ f, rel: f.name })));
+  $("#gllfUpD").onchange = (e) => gllfUpload([...e.target.files].map((f) => ({ f, rel: f.webkitRelativePath || f.name })));
+  const drop = $("#gllfDrop");
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("drag"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
+  drop.addEventListener("drop", async (e) => { e.preventDefault(); drop.classList.remove("drag"); gllfUpload(await gllfDropped(e.dataTransfer)); });
+  gllfList();
+  if (GLLF.file) gllfOpen(GLLF.file);
+}
+/** Files from a drop, folders included (walks webkit entries). */
+async function gllfDropped(dt) {
+  const out = [], entries = [...dt.items].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.length) return [...dt.files].map((f) => ({ f, rel: f.name }));
+  const walk = (ent, pre) => new Promise((res) => {
+    if (ent.isFile) ent.file((f) => { out.push({ f, rel: pre + f.name }); res(); }, () => res());
+    else { const rd = ent.createReader(), all = []; const next = () => rd.readEntries(async (list) => { if (!list.length) { for (const x of all) await walk(x, pre + ent.name + "/"); res(); } else { all.push(...list); next(); } }, () => res()); next(); }
+  });
+  for (const e of entries) await walk(e, "");
+  return out;
+}
+const gllfJoin = (...p) => p.filter(Boolean).join("/").replace(/\/+/g, "/");
+async function gllfList() {
+  const el = $("#gllfList"); if (!el) return;
+  const parts = GLLF.dir ? GLLF.dir.split("/") : [];
+  $("#gllfCrumbs").innerHTML = `<button class="small ghost" data-gllfdir="">📦 ${esc(gllRepo()?.name || "")}</button>` + parts.map((p, i) => `<span class="muted">/</span><button class="small ghost" data-gllfdir="${esc(parts.slice(0, i + 1).join("/"))}">${esc(p)}</button>`).join("");
+  try {
+    const t = await gitApi(`/tree?repo=${GLLS.cur}&path=${enc(GLLF.dir)}`);
+    el.innerHTML = (GLLF.dir ? `<div class="gllf-i" data-gllfdir="${esc(parts.slice(0, -1).join("/"))}">⬆ ..</div>` : "") +
+      (t.items.map((x) => { const p = gllfJoin(GLLF.dir, x.name); return `<div class="gllf-i ${GLLF.file === p ? "on" : ""}" ${x.dir ? `data-gllfdir="${esc(p)}"` : `data-gllfile="${esc(p)}"`}><span>${x.dir ? "📁" : gllfIcon(x.name)}</span><span class="gllf-n">${esc(x.name)}</span><span class="muted tiny">${x.dir ? "" : gllfSize(x.size)}</span></div>`; }).join("") || '<p class="muted tiny">Empty folder.</p>') + (t.more ? '<p class="muted tiny">Only the first 3,000 entries are shown.</p>' : "");
+  } catch (e) { el.innerHTML = `<div class="warnbox">${esc(e.message)}</div>`; }
+}
+const gllfIcon = (n) => (/\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(n) ? "🖼" : /\.(md|txt|pdf|docx?)$/i.test(n) ? "📄" : /\.(json|ya?ml|xml|properties|env|toml|ini)$/i.test(n) ? "⚙" : "📃");
+const gllfSize = (b) => (b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB");
+const gllfB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = () => rej(r.error); r.readAsDataURL(file); });
+async function gllfUpload(list) {
+  if (!list.length) return;
+  const big = list.filter((x) => x.f.size > 25 * 1048576); if (big.length) toast(`Skipped ${big.length} file(s) over 25 MB`);
+  const ok = list.filter((x) => x.f.size <= 25 * 1048576 && !/(^|\/)\.git(\/|$)/.test(x.rel));
+  if (ok.length > 300 && !confirm(`Upload ${ok.length} files into ${GLLF.dir || "the repository root"}?`)) return;
+  let done = 0, failed = [], exists = [];
+  GLLS.busy = `Uploading 0 / ${ok.length}`; gllBusy();
+  await pool(ok, 3, async (x) => {
+    const rel = x.rel.split("/"), name = rel.pop(), dir = gllfJoin(GLLF.dir, ...rel);
+    try { await gitApi("/file/upload", { repo: GLLS.cur, dir, name, data: await gllfB64(x.f) }); }
+    catch (e) { if (e.status === 409) exists.push(x); else failed.push(`${x.rel}: ${e.message}`); }
+    GLLS.busy = `Uploading ${++done} / ${ok.length}`; gllBusy();
+  });
+  if (exists.length && confirm(`${exists.length} file(s) already exist (${exists.slice(0, 3).map((x) => x.rel).join(", ")}${exists.length > 3 ? "…" : ""}). Replace them? A backup is kept.`)) {
+    await pool(exists, 3, async (x) => { const rel = x.rel.split("/"), name = rel.pop(); try { await gitApi("/file/upload", { repo: GLLS.cur, dir: gllfJoin(GLLF.dir, ...rel), name, data: await gllfB64(x.f), overwrite: true }); } catch (e) { failed.push(`${x.rel}: ${e.message}`); } });
+  }
+  GLLS.busy = ""; gllBusy();
+  if (failed.length) gllError("Upload", failed.slice(0, 20).join("\n")); else toast(`Uploaded ${ok.length - exists.length} file(s)`);
+  gllfList(); gllStatus(GLLS.cur).then(() => gllFillList()).catch(() => {});
+}
+async function gllfOpen(p) {
+  if (GLLF.dirty && GLLF.file !== p && !confirm(`Discard your unsaved edits in ${GLLF.file}?`)) return;
+  GLLF.file = p; GLLF.dirty = false;
+  document.querySelectorAll("#gllfList [data-gllfile]").forEach((x) => x.classList.toggle("on", x.dataset.gllfile === p));
+  const ed = $("#gllfEd"); if (!ed) return;
+  ed.innerHTML = '<p class="muted"><span class="spin"></span> Opening…</p>';
+  let f; try { f = await gitApi(`/file?repo=${GLLS.cur}&path=${enc(p)}`); } catch (e) { ed.innerHTML = `<div class="warnbox">${esc(e.message)}</div>`; GLLF.file = null; return; }
+  const head = `<div class="gllf-h"><b title="${esc(p)}">${esc(p)}</b><span class="muted tiny">${gllfSize(f.size)}</span><span id="gllfSt" class="muted tiny"></span><span class="grow"></span>
+    ${window.GLKIRO ? '<button class="small" data-glact="gllfkiro">🤖 Ask Kiro</button>' : ""}<button class="small ghost" data-glact="gllfren">✎ Rename</button><button class="small ghost danger" data-glact="gllfdel">🗑 Delete</button>
+    ${f.content != null ? '<button class="small primary-s" data-glact="gllfsave">💾 Save</button>' : ""}</div>`;
+  if (f.content == null) { ed.innerHTML = head + `<div class="gll-hero"><p class="muted">${f.tooBig ? "File larger than 2 MB — open it in your editor." : "Binary file — cannot be edited here."}</p></div>`; return; }
+  ed.innerHTML = head + `<textarea id="gllfTa" class="gllf-ta" spellcheck="false"></textarea>`;
+  const ta = $("#gllfTa"); ta.value = f.content; ta.dataset.at = f.at;
+  ta.addEventListener("input", () => { GLLF.dirty = true; $("#gllfSt").textContent = "● unsaved"; });
+  ta.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); glAction("gllfsave"); }
+    if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); const s = ta.selectionStart; ta.setRangeText("  ", s, ta.selectionEnd, "end"); GLLF.dirty = true; $("#gllfSt").textContent = "● unsaved"; }
+  });
+}
+
 // ================= actions =================
 Object.assign(GL_ACTIONS, {
   clone: (pid) => { const p = GL.projects.find((x) => x.id === +pid); if (p) (glDirect() && !GL_GIT ? gllCloneDirect(p) : gllClone(p)); },
@@ -519,8 +661,8 @@ Object.assign(GL_ACTIONS, {
     const r = await gllDo(`Create ${name}`, () => gitApi("/checkout", { repo: GLLS.cur, branch: name, create: true, from })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; GLLS.sub = "changes"; gllRenderRepo(); }
   },
   gllbranchat: async (sha) => { const name = prompt("New branch name (created at this commit):"); if (!name) return; const r = await gllDo(`Create ${name}`, () => gitApi("/checkout", { repo: GLLS.cur, branch: name.trim(), create: true, from: sha })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; gllRenderRepo(); } },
-  gllcheckout: async (name) => { const st = gllSt(); if (st.files.some((f) => !f.untracked) && !confirm(`You have uncommitted changes on ${st.branch}. Git keeps them if they do not clash; otherwise it refuses. Stash them first if unsure. Switch to ${name}?`)) return; const r = await gllDo(`Switch to ${name}`, () => gitApi("/checkout", { repo: GLLS.cur, branch: name })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; gllRenderRepo(); } },
-  gllcheckoutr: async (name) => { const r = await gllDo(`Check out ${name}`, () => gitApi("/checkout", { repo: GLLS.cur, branch: name, remote: true })); if (r) { GLLS.st[GLLS.cur] = { ...r, at: Date.now() }; gllRenderRepo(); } },
+  gllcheckout: async (name) => { await gllSwitch(GLLS.cur, name); gllRenderRepo(); },
+  gllcheckoutr: async (name) => { await gllSwitch(GLLS.cur, name, { remote: true }); gllRenderRepo(); },
   gllcompare: (name) => gllCompare(name),
   gllmergein: async (name) => { const st = gllSt(); if (!confirm(`Merge ${name} into ${st.branch}?`)) return; const r = await gllDo(`Merge ${name}`, () => gitApi("/merge", { repo: GLLS.cur, branch: name })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; if (r.conflicts) { GLLS.sub = "conflicts"; toast("Merge has conflicts — resolve them"); } gllRenderRepo(); } },
   gllrebaseon: async (name) => { const st = gllSt(); if (!confirm(`Rebase ${st.branch} onto ${name}?\n\nYour commits are replayed on top of ${name}. If ${st.branch} was already pushed you would need a force push, which JiraTime does not do.`)) return; const r = await gllDo(`Rebase onto ${name}`, () => gitApi("/rebase", { repo: GLLS.cur, onto: name })); if (r) { GLLS.st[GLLS.cur] = { ...r.status, at: Date.now() }; if (r.conflicts) GLLS.sub = "conflicts"; gllRenderRepo(); } },
@@ -562,6 +704,22 @@ Object.assign(GL_ACTIONS, {
       <div class="foot"><button data-glact="closedet">Close</button></div>`);
   },
   gllkiro: () => { window.GLKIRO?.setRepo(GLLS.cur); glGo("kiro"); },
+  gllfnew: async (kind) => {
+    const name = prompt(kind === "folder" ? "New folder name (you can use a/b/c):" : "New file name (e.g. notes.md or src/util/Helper.java):"); if (!name) return;
+    const p = gllfJoin(GLLF.dir, name.trim().replace(/^\/+/, ""));
+    try {
+      if (kind === "folder") { await gitApi("/file/mkdir", { repo: GLLS.cur, path: p }); GLLF.dir = p; toast("Folder created (git shows it once it contains a file)"); gllfList(); }
+      else { await gitApi("/file/write", { repo: GLLS.cur, path: p, content: "", create: true }); toast("File created"); gllfList(); gllfOpen(p); }
+    } catch (e) { toast(e.message); }
+  },
+  gllfsave: async () => {
+    const ta = $("#gllfTa"); if (!ta || !GLLF.file) return;
+    try { const r = await gitApi("/file/write", { repo: GLLS.cur, path: GLLF.file, content: ta.value, at: ta.dataset.at }); ta.dataset.at = r.at; GLLF.dirty = false; $("#gllfSt").textContent = "✓ saved"; gllStatus(GLLS.cur).then(() => gllFillList()).catch(() => {}); }
+    catch (e) { if (e.status === 409 && confirm(e.message + "\n\nOverwrite it with your version anyway? (a backup is kept)")) { ta.dataset.at = ""; glAction("gllfsave"); } else if (e.status !== 409) toast(e.message); }
+  },
+  gllfren: async () => { const to = prompt("New name:", GLLF.file.split("/").pop()); if (!to) return; try { const r = await gitApi("/file/rename", { repo: GLLS.cur, from: GLLF.file, to: to.trim() }); GLLF.file = r.path; gllfList(); gllfOpen(r.path); } catch (e) { toast(e.message); } },
+  gllfdel: async () => { if (!confirm(`Delete ${GLLF.file}? A backup copy is kept in ~/.config/jiratime/backups.`)) return; try { await gitApi("/file/delete", { repo: GLLS.cur, path: GLLF.file }); toast("Deleted"); GLLF.file = null; GLLF.dirty = false; gllFiles(); } catch (e) { toast(e.message); } },
+  gllfkiro: () => { const f = GLLF.file; window.GLKIRO?.setRepo(GLLS.cur); window.GLKIRO?.prefill(`About the file ${f}: `); glGo("kiro"); },
   gllsub: (s) => { closeModal(); GLLS.sub = s; gllRenderRepo(); },
   glltpl: () => {
     const t = gllTpl();
@@ -574,11 +732,13 @@ Object.assign(GL_ACTIONS, {
   gllprepmr: () => { closeModal(); const repo = gllRepo(), p = gllProject(repo), st = gllSt(); if (window.GLM && p) GLM.prepare(p, st.branch, st.defaultBranch || p.branch, repo); },
 });
 
-function gllOpenRepo(id) { GLLS.cur = id; GLLS.sub = "changes"; GLLS.sel = null; GLLS.commit = null; if (GL.tab !== "local") glGo("local"); else gllRenderRepo(); closeModal(); }
+function gllOpenRepo(id) { if (GLLS.cur !== id) Object.assign(GLLF, { dir: "", file: null, dirty: false }); GLLS.cur = id; GLLS.sub = "changes"; GLLS.sel = null; GLLS.commit = null; if (GL.tab !== "local") glGo("local"); else gllRenderRepo(); closeModal(); }
 
 // delegated clicks inside the workspace
 document.addEventListener("click", (e) => {
   const root = e.target.closest("#gllMain, #gllList"); if (!root) return;
+  const fd = e.target.closest("[data-gllfdir]"); if (fd) { GLLF.dir = fd.dataset.gllfdir; gllfList(); return; }
+  const ff = e.target.closest("[data-gllfile]"); if (ff) { gllfOpen(ff.dataset.gllfile); return; }
   const it = e.target.closest("[data-gllrepo]"); if (it) { gllOpenRepo(it.dataset.gllrepo); return; }
   const sub = e.target.closest("[data-gllsub]"); if (sub) { GLLS.sub = sub.dataset.gllsub; gllRenderRepo(); return; }
   const fx = e.target.closest("[data-gllx]"); if (fx) { const row = fx.closest("[data-gllf]"); e.stopPropagation(); gllFileAct(fx.dataset.gllx, row.dataset.gllf, row.dataset.staged === "1"); return; }
@@ -597,5 +757,5 @@ document.addEventListener("input", (e) => { const t = e.target.closest?.("[data-
 // GL actions inside modals (folder picker, clone result, pull options…) go through gitlab.js's modal listener.
 
 glAddTab({ id: "local", icon: "⌂", label: "Local repos", render: () => gllRenderTab(), refresh: () => { if (!glDirect() || GL_GIT) gllFillList(); }, count: () => (GLLS.repos ? String(GLLS.repos.length) : "") }, "projects");
-window.GLL = { localFor: gllLocalFor, load: gllLoad, clone: gllClone, open: gllOpenRepo, pickFolder: gllPickFolder, parseConflicts: gllParseConflicts, join: gllJoin, graph: gllGraph, get state() { return GLLS; } };
+window.GLL = { switchBranch: gllSwitch, localFor: gllLocalFor, load: gllLoad, clone: gllClone, open: gllOpenRepo, pickFolder: gllPickFolder, parseConflicts: gllParseConflicts, join: gllJoin, graph: gllGraph, get state() { return GLLS; } };
 JT.on("view", (v) => { if (v === "gitlab" && (!glDirect() || GL_GIT)) gllLoad().then(() => { if (GL.tab === "overview") glRerender(); }).catch(() => {}); });
