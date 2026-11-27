@@ -15,10 +15,26 @@ async function gllLoad(force) {
   if (!GLLS.tools) gitApi("/tools").then((t) => { GLLS.tools = t; }).catch(() => {});
   return GLLS.repos;
 }
-function gllLocalFor(p) {
+/** The user's own clone of a project (opts.cache: also / only JiraTime's review copy for Kiro). */
+function gllLocalFor(p, { cache = false } = {}) {
   if (!GLLS.repos || !p) return null;
   let host = ""; try { host = new URL(GL.st.url).hostname.toLowerCase(); } catch { /* */ }
-  return GLLS.repos.find((r) => r.projectId === p.id || (r.remotePath === p.path.toLowerCase() && (!r.remoteHost || r.remoteHost === host))) || null;
+  const hit = (r) => r.projectId === p.id || (r.remotePath === p.path.toLowerCase() && (!r.remoteHost || r.remoteHost === host));
+  return GLLS.repos.find((r) => hit(r) && !r.kiroCache) || (cache ? GLLS.repos.find((r) => hit(r) && r.kiroCache) : null) || null;
+}
+/** A review copy of any GitLab project for Kiro (kept in a cache folder, not shown in Local repos). Resolves with the repo. */
+async function gllReviewCopy(p) {
+  await gllLoad(true).catch(() => {});
+  const have = gllLocalFor(p, { cache: true }); if (have) return have;
+  openModal(`<div class="gll-clone"><h3>🤖 Getting ${esc(p.name)} ready for Kiro</h3>
+    <p class="muted tiny">It is not on this laptop yet, so JiraTime downloads a review copy (only the files that are needed — usually under a minute). Your Local repos are not touched.</p><div id="gllProg"></div></div>`);
+  const prog = (pct, line, cls = "") => { const el = $("#gllProg"); if (el) el.innerHTML = `<div class="gll-bar ${cls}"><div style="width:${pct}%"></div></div><div class="tiny muted gll-line">${esc(line || "")}</div>`; };
+  prog(3, "Starting…");
+  let job = await gitApi("/clone", { url: p.http, projectId: p.id, kiroCache: true });
+  while (job.id && !["done", "failed"].includes(job.status)) { await sleep(700); try { job = await gitApi(`/job?id=${job.id}`); } catch (e) { job = { status: "failed", error: e.message }; } prog(job.percent || 5, job.progress); }
+  if (job.status === "failed") { prog(100, job.error, "bad"); throw new Error(job.error || "Download failed"); }
+  await gllLoad(true); closeModal();
+  return job.repo;
 }
 const gllProject = (repo) => (GL.projects || []).find((p) => p.id === repo.projectId || p.path.toLowerCase() === repo.remotePath) || null;
 const gllRepo = () => GLLS.repos?.find((r) => r.id === GLLS.cur) || null;
@@ -167,7 +183,7 @@ function gllRenderTab() {
       <div id="gllList" class="gll-list"><p class="muted tiny">Loading…</p></div></aside>
     <section class="gll-main" id="gllMain"></section></div>`;
   $("#gllQ").addEventListener("input", gllFillList);
-  gllLoad(true).then(() => { gllFillList(); if (!GLLS.cur && GLLS.repos.length) GLLS.cur = GLLS.repos.slice().sort((a, b) => (b.openedAt || "").localeCompare(a.openedAt || ""))[0].id; gllRenderRepo(); })
+  gllLoad(true).then(() => { gllFillList(); if (!GLLS.cur && GLLS.repos.some((r) => !r.kiroCache)) GLLS.cur = GLLS.repos.filter((r) => !r.kiroCache).slice().sort((a, b) => (b.openedAt || "").localeCompare(a.openedAt || ""))[0].id; gllRenderRepo(); })
     .catch((e) => { $("#gllList").innerHTML = `<div class="warnbox">${esc(e.message)}</div>`; });
 }
 const gllItemInfo = (r) => {
@@ -180,7 +196,7 @@ const gllItemInfo = (r) => {
 function gllFillList() {
   const el = $("#gllList"); if (!el || !GLLS.repos) return;
   const q = ($("#gllQ")?.value || "").toLowerCase();
-  const list = GLLS.repos.filter((r) => !q || (r.name + " " + r.path + " " + (r.remotePath || "")).toLowerCase().includes(q)).sort((a, b) => (b.openedAt || "").localeCompare(a.openedAt || "") || a.name.localeCompare(b.name));
+  const list = GLLS.repos.filter((r) => !r.kiroCache).filter((r) => !q || (r.name + " " + r.path + " " + (r.remotePath || "")).toLowerCase().includes(q)).sort((a, b) => (b.openedAt || "").localeCompare(a.openedAt || "") || a.name.localeCompare(b.name));
   el.innerHTML = list.map((r) => `<div class="gll-item ${r.id === GLLS.cur ? "on" : ""}" data-gllrepo="${r.id}"><div class="gll-in"><span class="gll-ic">${GLLS.st[r.id]?.state ? "⚠" : "📦"}</span><b>${esc(r.name)}</b>${GLLS.st[r.id]?.state ? ` <span class="b bad">${esc(GLLS.st[r.id].state)}</span>` : ""}</div>
       <div class="muted tiny gll-ip">${gllItemInfo(r)}</div></div>`).join("")
     || `<div class="gll-empty"><p>${q ? "No repository matches." : "No repositories yet."}</p>${q ? "" : '<p class="muted tiny">Clone one from <b>Projects</b>, add a folder that is already a git repository, or scan a folder (e.g. ~/projects) to find all of them.</p>'}</div>`;
@@ -793,6 +809,6 @@ document.addEventListener("click", (e) => {
 document.addEventListener("input", (e) => { const t = e.target.closest?.("[data-gllce]"); if (t) { const fl = GLLS.cf.files[GLLS.cfIdx]; GLLS.cfChoice[fl.path][+t.dataset.gllce] = { take: "edit", text: t.value }; } });
 // GL actions inside modals (folder picker, clone result, pull options…) go through gitlab.js's modal listener.
 
-glAddTab({ id: "local", icon: "⌂", label: "Local repos", render: () => gllRenderTab(), refresh: () => { if (!glDirect() || GL_GIT) gllFillList(); }, count: () => (GLLS.repos ? String(GLLS.repos.length) : "") }, "projects");
-window.GLL = { switchBranch: gllSwitch, localFor: gllLocalFor, load: gllLoad, clone: gllClone, open: gllOpenRepo, pickFolder: gllPickFolder, parseConflicts: gllParseConflicts, join: gllJoin, graph: gllGraph, get state() { return GLLS; } };
+glAddTab({ id: "local", icon: "⌂", label: "Local repos", render: () => gllRenderTab(), refresh: () => { if (!glDirect() || GL_GIT) gllFillList(); }, count: () => (GLLS.repos ? String(GLLS.repos.filter((r) => !r.kiroCache).length) : "") }, "projects");
+window.GLL = { reviewCopy: gllReviewCopy, switchBranch: gllSwitch, localFor: gllLocalFor, load: gllLoad, clone: gllClone, open: gllOpenRepo, pickFolder: gllPickFolder, parseConflicts: gllParseConflicts, join: gllJoin, graph: gllGraph, get state() { return GLLS; } };
 JT.on("view", (v) => { if (v === "gitlab" && (!glDirect() || GL_GIT)) gllLoad().then(() => { if (GL.tab === "overview") glRerender(); }).catch(() => {}); });

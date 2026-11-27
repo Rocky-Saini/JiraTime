@@ -66,10 +66,12 @@ async function glkRenderTab() {
   }
   const repos = (await GLL.load().catch(() => [])) || [];
   if (!repos.some((r) => r.id === GLK2.repo)) GLK2.repo = (GLL.state.cur && repos.some((r) => r.id === GLL.state.cur) ? GLL.state.cur : repos[0]?.id) || "";
-  if (!repos.length) { body.innerHTML = `<div class="card gll-hero"><h3>🤖 Kiro</h3><p class="muted">Clone or add a repository first — Kiro works inside it.</p><button class="small primary-s" data-glact="tab:projects">Go to Projects</button> <button class="small" data-glact="tab:local">Local repos</button></div>`; return; }
+  if (!repos.length) { body.innerHTML = `<div class="card gll-hero"><h3>🤖 Kiro</h3><p class="muted">Pick any GitLab project — JiraTime gets a review copy for Kiro, no clone needed.</p><button class="small primary-s" data-glact="glkpick">＋ Choose a GitLab project</button></div>`; return; }
   body.innerHTML = `<div class="glk-wrap">
     <div class="card glk-bar">
-      <label>Repository <select id="glkRepo">${repos.map((r) => `<option value="${esc(r.id)}" ${r.id === GLK2.repo ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select></label>
+      <label>Repository <select id="glkRepo"><optgroup label="On this laptop">${repos.filter((r) => !r.kiroCache).map((r) => `<option value="${esc(r.id)}" ${r.id === GLK2.repo ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</optgroup>
+        ${repos.some((r) => r.kiroCache) ? `<optgroup label="Review copies (any GitLab project)">${repos.filter((r) => r.kiroCache).map((r) => `<option value="${esc(r.id)}" ${r.id === GLK2.repo ? "selected" : ""}>${esc(r.remotePath || r.name)}</option>`).join("")}</optgroup>` : ""}
+        <option value="__pick">＋ Any GitLab project…</option></select></label>
       <label>Branch <select id="glkBr"><option>…</option></select></label>
       <div class="gl-seg" title="What Kiro may do"><button class="${GLK2.mode === "ask" ? "on" : ""}" data-glact="glkmode:ask">👁 Read only</button><button class="${GLK2.mode === "edit" ? "on" : ""}" data-glact="glkmode:edit">✎ May edit files</button></div>
       <span class="grow"></span><span class="muted tiny" title="${esc(st.who || "")}">Kiro CLI ${esc((st.version || "").replace(/^kiro-cli\s*/, ""))}</span>
@@ -81,7 +83,7 @@ async function glkRenderTab() {
         <textarea id="glkQ" rows="3" placeholder="Ask Kiro about this repository… Paste a screenshot with Ctrl+V or drop files here. (Enter = send, Shift+Enter = new line)"></textarea>
         <div class="glk-send"><button class="primary" id="glkGo" style="width:auto;margin:0">Send</button><button class="small danger hidden" id="glkStop">■ Stop</button></div></div>
       <p class="muted tiny glk-note">Runs Kiro CLI on this laptop inside the repository with your Kiro login. ${GLK2.mode === "edit" ? "<b>Kiro may change files</b> — check them in Local repos → Changes before you commit." : "Read only: Kiro cannot change files."} Kiro never runs shell / git commands from here.</p></div></div>`;
-  $("#glkRepo").onchange = (e) => { GLK2.att = []; GLK2.repo = e.target.value; localStorage.setItem("jiratime.kiro.repo", GLK2.repo); glkRenderTab(); };
+  $("#glkRepo").onchange = (e) => { if (e.target.value === "__pick") { e.target.value = GLK2.repo; return glkPickProject(); } GLK2.att = []; GLK2.repo = e.target.value; localStorage.setItem("jiratime.kiro.repo", GLK2.repo); glkRenderTab(); };
   $("#glkGo").onclick = () => glkSend();
   $("#glkStop").onclick = () => GLK2.job && gitApi("/kiro/stop", { id: GLK2.job.id }).catch(() => {});
   $("#glkQ").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); glkSend(); } });
@@ -126,7 +128,7 @@ function glkDraw() {
       ${sp.activity.length ? `<details class="glk-act" ${live && !sp.answer ? "open" : ""}><summary>${live ? '<span class="spin"></span> ' : ""}${sp.activity.filter((x) => /using tool/.test(x)).length} step${sp.activity.filter((x) => /using tool/.test(x)).length === 1 ? "" : "s"} — files Kiro looked at</summary><div>${sp.activity.slice(-80).map((x) => `<div>${esc(x)}</div>`).join("")}</div></details>` : live ? '<div class="muted tiny"><span class="spin"></span> Kiro is thinking…</div>' : ""}
       ${sp.answer ? `<div class="glk-ans">${glkMd(sp.answer)}</div>` : ""}
       ${m.error ? `<div class="warnbox tiny">⚠ ${esc(m.error)}</div>` : ""}
-      ${!live ? `<div class="glk-meta muted tiny">${m.status === "stopped" ? "stopped · " : ""}${esc(m.credits || "")}${sp.answer ? ` <button class="small ghost" data-glkcopy="${h.indexOf(m)}">⧉ Copy</button>` : ""}</div>` : ""}</div></div>`;
+      ${!live ? `<div class="glk-meta muted tiny">${m.status === "stopped" ? "stopped · " : ""}${esc(m.credits || "")}${sp.answer ? ` <button class="small ghost" data-glkcopy="${h.indexOf(m)}">⧉ Copy</button>` : ""}${sp.answer && m.mr ? (m.posted ? ` <span class="b new">posted on !${m.mr.iid}</span>` : ` <button class="small primary-s" data-glkpost="${h.indexOf(m)}">💬 Post on !${m.mr.iid}</button>`) : ""}</div>` : ""}</div></div>`;
   }).join("") || `<div class="glk-empty"><b>Ask anything about this repository</b><p class="muted tiny">e.g. “Where is the quote id generated?”, “Why could this API return 500?”, “Review the changes on this branch”.</p></div>`;
   el.scrollTop = el.scrollHeight;
 }
@@ -141,13 +143,13 @@ async function glkSend(text, opts = {}) {
     if (att.length) { GLK2.att = []; glkAttDraw(); }
     if ($("#glkQ") && text == null) $("#glkQ").value = "";
     const h = glkHist.get(GLK2.repo); h.push({ role: "user", text: q, label: opts.label || (GLK2.mode === "edit" ? "may edit" : ""), files: att.map((a) => ({ name: a.name, kind: a.kind, thumb: a.thumb || "" })), at: Date.now() }); glkHist.set(GLK2.repo, h);
-    glkAttach(job);
+    glkAttach(job, opts.mr);
   } catch (e) { toast(e.message); }
 }
-function glkAttach(job) {
+function glkAttach(job, mr) {
   const repo = GLK2.repo, h = glkHist.get(repo);
   let msg = h.find((m) => m.role === "ai" && m.job === job.id);
-  if (!msg) { msg = { role: "ai", job: job.id, out: job.out || "", live: true, at: Date.now() }; h.push(msg); glkHist.set(repo, h); }
+  if (!msg) { msg = { role: "ai", job: job.id, out: job.out || "", live: true, at: Date.now(), ...(mr ? { mr } : {}) }; h.push(msg); glkHist.set(repo, h); }
   GLK2.job = job; $("#glkGo")?.classList.add("hidden"); $("#glkStop")?.classList.remove("hidden"); glkDraw();
   let size = job.size || (job.out || "").length;
   clearTimeout(GLK2.poll);
@@ -165,10 +167,10 @@ function glkAttach(job) {
 async function glkForProject(p, review) {
   if (glDirect() && !GL_GIT) { glGo("kiro"); return; }
   await GLL.load().catch(() => {});
-  const r = GLL.localFor(p);
-  if (!r) { toast("Clone the project first — Kiro works on a copy on your laptop"); closeModal(); GLL.clone(p); return; }
+  let r = GLL.localFor(p, { cache: true });
+  if (!r) { try { r = await GLL.reviewCopy(p); } catch (e) { toast(e.message); return; } }
   GLK2.repo = r.id; localStorage.setItem("jiratime.kiro.repo", r.id); closeModal(); glGo("kiro");
-  if (review) { await sleep(400); if (GL.tab === "kiro") glkSend(review.text, { review: review.body, label: review.label }); }
+  if (review) { await sleep(500); if (GL.tab === "kiro") glkSend(review.text, { review: review.body, label: review.label, mr: review.mr }); }
 }
 
 // ================= attachments =================
@@ -199,7 +201,31 @@ function glkAttDraw() {
 }
 document.addEventListener("click", (e) => { const b = e.target.closest("[data-glkrm]"); if (!b) return; GLK2.att = GLK2.att.filter((a) => a.key !== b.dataset.glkrm); glkAttDraw(); });
 
+/** Choose any GitLab project for Kiro (a review copy is prepared if it is not on this laptop). */
+function glkPickProject() {
+  const all = glRanked().map((x) => x.p);
+  openModal(`<div class="gl-det" data-gldet="0"><h3>🤖 Which project should Kiro look at?</h3>
+    <input id="glkPq" placeholder="Search your ${all.length} GitLab projects…" style="width:100%;margin:6px 0 10px" autocomplete="off"><div id="glkPl" class="glr-pl"></div>
+    <p class="muted tiny">Projects not on this laptop get a review copy in JiraTime's cache — your Local repos stay as they are.</p><div class="foot"><button data-glact="closedet">Cancel</button></div></div>`);
+  const draw = () => { const q = $("#glkPq").value.toLowerCase().split(/\s+/).filter(Boolean);
+    $("#glkPl").innerHTML = all.filter((p) => q.every((t) => p.path.toLowerCase().includes(t))).slice(0, 80).map((p) => { const l = GLL.localFor(p, { cache: true });
+      return `<div class="gllf-i" data-glkp="${p.id}"><span>${l && !l.kiroCache ? "📦" : l ? "🗂" : "▤"}</span><span class="gllf-n"><b>${esc(p.name)}</b> <span class="muted tiny">${esc(p.ns)}</span></span><span class="muted tiny">${l && !l.kiroCache ? "on this laptop" : l ? "review copy" : "not downloaded"}</span></div>`; }).join("") || '<p class="muted tiny">No project matches.</p>'; };
+  $("#glkPq").oninput = draw; draw(); setTimeout(() => $("#glkPq").focus(), 30);
+  $("#glkPl").onclick = (e) => { const it = e.target.closest("[data-glkp]"); if (!it) return; const p = all.find((x) => x.id === +it.dataset.glkp); if (p) glkForProject(p); };
+}
+async function glkPost(i) {
+  const h = glkHist.get(GLK2.repo), m = h[+i]; if (!m?.mr) return;
+  const text = glkSplit(m.out).answer;
+  if (!await uiConfirm(`Post this review as a comment on merge request !${m.mr.iid}? Everybody on the merge request sees it.`, { title: "Post review on GitLab?", ok: "Post comment", danger: false })) return;
+  try {
+    await glApi(`/projects/${m.mr.pid}/merge_requests/${m.mr.iid}/notes`, { method: "POST", body: { body: `### 🤖 Code review (Kiro via JiraTime)\n\n${text}` } });
+    m.posted = true; glkHist.set(GLK2.repo, h); glkDraw(); toast(`Posted on !${m.mr.iid}`);
+  } catch (e) { toast(e.message); }
+}
+document.addEventListener("click", (e) => { const b = e.target.closest("[data-glkpost]"); if (b) glkPost(b.dataset.glkpost); });
+
 Object.assign(GL_ACTIONS, {
+  glkpick: () => glkPickProject(),
   glkrecheck: async () => { await gitApi("/kiro/status?force=1").catch(() => {}); glkRenderTab(); },
   glkmode: (m) => { GLK2.mode = m; glkRenderTab(); },
   glknew: () => { if (GLK2.job) return toast("Wait for the current answer first"); glkSys("New conversation"); GLK2.fresh = true; toast("The next message starts a new conversation"); },
@@ -208,7 +234,7 @@ Object.assign(GL_ACTIONS, {
   kiroproject: (pid) => { const p = GL.projects.find((x) => x.id === +pid); if (p) glkForProject(p); },
   kiromr: () => {
     const c = GLMS.cur, m = c?.mr, p = m && glmProj(c.pid); if (!p) return;
-    glkForProject(p, { text: `Review merge request !${m.iid}: ${glmStripDraft(m.title)}`, label: `🔍 Review !${m.iid}`, body: { kind: "mr", iid: m.iid, title: glmStripDraft(m.title), description: m.description || "", source: m.source_branch, target: m.target_branch } });
+    glkForProject(p, { mr: { pid: c.pid, iid: m.iid }, text: `Review merge request !${m.iid}: ${glmStripDraft(m.title)}`, label: `🔍 Review !${m.iid}`, body: { kind: "mr", iid: m.iid, title: glmStripDraft(m.title), description: m.description || "", source: m.source_branch, target: m.target_branch } });
   },
 });
 document.addEventListener("click", (e) => {
