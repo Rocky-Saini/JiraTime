@@ -75,7 +75,8 @@ async function glkRenderTab() {
       <label>Branch <select id="glkBr"><option>…</option></select></label>
       <div class="gl-seg" title="What Kiro may do"><button class="${GLK2.mode === "ask" ? "on" : ""}" data-glact="glkmode:ask">👁 Read only</button><button class="${GLK2.mode === "edit" ? "on" : ""}" data-glact="glkmode:edit">✎ May edit files</button></div>
       <span class="grow"></span><span class="muted tiny" title="${esc(st.who || "")}">Kiro CLI ${esc((st.version || "").replace(/^kiro-cli\s*/, ""))}</span>
-      <button class="small" data-glact="glkreview:local">🔍 Review my changes</button><button class="small" data-glact="glknew" title="Start a fresh conversation">＋ New chat</button></div>
+      <button class="small" data-glact="glkreview:local">🔍 Review my changes</button><button class="small" data-glact="glknew" title="Start a fresh conversation">＋ New chat</button>
+      <button class="small ghost" data-glact="glkcache" title="Review copies of projects that are not cloned on this laptop">🗂 Review copies</button></div>
     <div class="card glk-chat"><div id="glkLog" class="glk-log"></div>
       <div class="glk-quick">${GLK_QUICK.map(([l], i) => `<button class="small ghost" data-glact="glkquick:${i}">${esc(l)}</button>`).join("")}</div>
       <div id="glkAtt" class="glk-att"></div>
@@ -224,7 +225,33 @@ async function glkPost(i) {
 }
 document.addEventListener("click", (e) => { const b = e.target.closest("[data-glkpost]"); if (b) glkPost(b.dataset.glkpost); });
 
+/** List / remove the review copies in JiraTime's cache. */
+async function glkCache() {
+  openModal('<div class="gl-det" data-gldet="0"><h3>🗂 Review copies</h3><p class="muted"><span class="spin"></span> Measuring…</p></div>');
+  let c; try { c = await gitApi("/kiro/cache"); } catch (e) { $("#modalBox").innerHTML = `<div class="warnbox">${esc(e.message)}</div><div class="foot"><button data-glact="closedet">Close</button></div>`; return; }
+  const mb = (n) => (n >= 1024 ? (n / 1024).toFixed(1) + " GB" : n + " MB");
+  $("#modalBox").innerHTML = `<div class="gl-det" data-gldet="0"><h3>🗂 Review copies</h3>
+    <p class="muted tiny">Copies of GitLab projects that JiraTime downloaded for Kiro because they are not cloned on this laptop. Your own clones in Local repos are never touched here.</p>
+    <div class="stats gl-stats" style="grid-template-columns:repeat(3,minmax(0,1fr))"><div class="stat"><b>${c.copies.length}</b><span>review copies</span></div><div class="stat"><b>${mb(c.totalMB)}</b><span>on disk</span><small>limit ${mb(c.maxMB)}</small></div><div class="stat"><b>${c.days} days</b><span>auto-clean</span><small>unused copies are removed</small></div></div>
+    <table class="gl-tbl">${c.copies.map((x) => `<tr><td><b>${esc(x.name)}</b><small class="muted">${esc(x.path.replace(/^\/home\/[^/]+/, "~"))}</small></td><td class="nowrap">${mb(x.mb)}</td><td class="muted tiny nowrap">used ${esc(ago(x.usedAt))}</td>
+      <td>${x.busy ? '<span class="muted tiny">Kiro is working</span>' : `<button class="small ghost danger" data-glkrmcache="${esc(x.id)}">🗑 Remove</button>`}</td></tr>`).join("") || '<tr><td class="muted">No review copies.</td></tr>'}</table>
+    <p class="muted tiny">Cleaned automatically: copies not used for ${c.days} days are removed, and the oldest ones go when all copies together pass ${mb(c.maxMB)}. A removed copy is downloaded again the next time you ask Kiro about that project.</p>
+    <div class="foot">${c.copies.length ? '<button class="danger" data-glkrmcache="__all">Remove all</button>' : ""}<span class="grow"></span><button data-glact="closedet" class="primary">Close</button></div></div>`;
+  $("#modalBox").querySelectorAll("[data-glkrmcache]").forEach((b) => b.addEventListener("click", async (e) => {
+    e.stopPropagation(); const id = b.dataset.glkrmcache, all = id === "__all";
+    if (!await uiConfirm(all ? `Remove all ${c.copies.length} review copies (${mb(c.totalMB)})?` : `Remove the review copy of ${c.copies.find((x) => x.id === id)?.name}?`, { title: "Free up disk space?", ok: "Remove" })) return;
+    try {
+      const r = await gitApi("/kiro/cache/remove", all ? { all: true } : { repo: id });
+      toast(all ? `Removed ${r.removed} review cop${r.removed === 1 ? "y" : "ies"}${r.busy ? ` (${r.busy} in use kept)` : ""}` : "Removed");
+      await GLL.load(true).catch(() => {});
+      if (!GLL.state.repos.some((x) => x.id === GLK2.repo)) GLK2.repo = "";
+      if (GL.tab === "kiro") await glkRenderTab(); glkCache();
+    } catch (err) { toast(err.message); }
+  }));
+}
+
 Object.assign(GL_ACTIONS, {
+  glkcache: () => glkCache(),
   glkpick: () => glkPickProject(),
   glkrecheck: async () => { await gitApi("/kiro/status?force=1").catch(() => {}); glkRenderTab(); },
   glkmode: (m) => { GLK2.mode = m; glkRenderTab(); },
