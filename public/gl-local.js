@@ -228,7 +228,7 @@ async function gllRenderRepo() {
         <button class="small ${st.ahead || !st.upstream ? "primary-s" : ""}" data-glact="gllpush" title="git push">⬆ Push${st.ahead ? ` <span class="gl-tc">${st.ahead}</span>` : !st.upstream && !st.detached ? " (new)" : ""}</button>
         ${window.GLM && p ? `<button class="small" data-glact="gllprepmr">🔀 Prepare MR</button>` : ""}
         ${gllOpenBtn(repo.id)}
-        ${window.GLKIRO ? `<button class="small" data-glact="gllkiro" title="Chat with Kiro CLI in this repository">🤖 Kiro</button>` : ""}
+        ${window.GLKIRO ? `<button class="small" data-glact="gllkiro" title="Chat with Kiro CLI in this repository">🤖 Kiro</button><button class="small" data-glact="gllcursor" title="Chat with Cursor Agent in this repository">⬛ Cursor</button>` : ""}
         <button class="small ghost" data-glact="gllmore" title="More">⋯</button></div></div>
     ${st.state ? `<div class="warnbox gll-state"><b>${esc(st.state)} in progress</b> — ${conflicts ? `${conflicts} file(s) in conflict. Resolve them in <b>Conflicts</b>.` : "all conflicts resolved."}
       <span class="grow"></span>${conflicts ? "" : `<button class="small primary-s" data-glact="gllcontinue">Continue ${esc(st.state)}</button>`} <button class="small danger" data-glact="gllabort">Abort ${esc(st.state)}</button></div>` : ""}
@@ -756,6 +756,7 @@ Object.assign(GL_ACTIONS, {
       <button class="small" data-glact="glltpl">Branch &amp; commit templates</button><button class="small danger" data-glact="gllremove:${repo.id}">Remove from JiraTime (keeps the folder)</button></div>
       <div class="foot"><button data-glact="closedet">Close</button></div>`);
   },
+  gllcursor: () => { window.GLKIRO?.setRepo(GLLS.cur); glGo("cursor"); },
   gllkiro: () => { window.GLKIRO?.setRepo(GLLS.cur); glGo("kiro"); },
   gllfnew: async (kind) => {
     const name = await uiPrompt(kind === "folder" ? "New folder name (you can use a/b/c):" : "New file name (e.g. notes.md or src/util/Helper.java):"); if (!name) return;
