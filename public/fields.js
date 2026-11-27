@@ -127,14 +127,13 @@ function fdRender() {
 /** Live AI efficiency for the issue being edited (uses the values on screen, saved or not). */
 function fdAiLine() {
   const el = $("#fdAi"); if (!el || !window.AIEFF) return;
-  const savedFields = FD.fields.filter((f) => f.kind === "number" && fdNorm(f.name).startsWith("aitimesaved"));
-  if (!savedFields.length) { el.innerHTML = ""; return; }
   const est = FD.fields.find((f) => f.kind === "estimate");
   const estS = est && est.key in FD.edits ? AIEFF.jiraSecs(FD.edits[est.key]) : FD.time?.origS || 0;
-  const savedH = savedFields.reduce((a, f) => a + (Number(fdVal(f)) || 0), 0);
+  const spentS = FD.time?.spentS || 0;                                            // effort logged with AI
+  const savedH = estS ? Math.round(((estS - spentS) / 3600) * 100) / 100 : 0;    // estimate is the effort without AI
   const pct = AIEFF.pct(savedH, estS), b = AIEFF.bands;
   el.innerHTML = `<span class="muted">AI efficiency</span> ${AIEFF.badge(pct)}
-    <span class="muted tiny">${estS ? `${Math.round(savedH * 100) / 100}h saved of ${secsToDur(estS)} estimate · target ${b.min}–${b.good}%, max ${b.max}%` : "Set an Original estimate to calculate it"}</span>`;
+    <span class="muted tiny">${estS ? `estimate ${secsToDur(estS)} (without AI) − logged ${secsToDur(spentS)} (with AI) = ${savedH < 0 ? `${-savedH}h over` : `${savedH}h saved`} · target ${b.min}–${b.good}%, max ${b.max}%` : "Set an Original estimate to calculate it"}</span>`;
 }
 
 /** Fill values by field name (from the AI report). Nothing is saved until the user presses Save. */

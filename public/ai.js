@@ -1,6 +1,9 @@
 "use strict";
 /* AI efficiency report.
-   AI efficiency % = (sum of all "AI Time Saved – … (Hours)" fields) ÷ Original estimate × 100, per Jira issue.
+   The Original estimate is the effort WITHOUT AI (Kiro). The time logged is the real effort WITH AI.
+   AI time saved = Original estimate − time logged;  AI efficiency % = AI time saved ÷ Original estimate × 100, per Jira issue.
+   Logged more than estimated -> negative (took longer than planned). The "AI Time Saved – … (Hours)" fields are only shown
+   for comparison and can be filled with the computed value in one click.
    Bands (editable): below 10 % = too low (red) · 10–20 % = on target (green) · 20–40 % = high (blue) · above 40 % = over the max (orange).
    Field ids are discovered by name from /rest/api/3/field, so this works on any Jira that has these fields.
    Uses globals from app.js (S, $, esc, jira, store, toast, …) and window.openIssueFields from fields.js. */
@@ -29,12 +32,15 @@ function aiBand(pct, b = AI.bands) {
   return { id: "over", label: `Above ${b.max}% max` };
 }
 const aiPct = (savedH, estS) => (estS > 0 ? Math.round(((savedH * 3600) / estS) * 1000) / 10 : null);
+/** Hours saved by AI = estimate (without AI) − logged (with AI). Can be negative. */
+const aiSavedH = (estS, spentS) => (estS > 0 ? Math.round(((estS - spentS) / 3600) * 100) / 100 : 0);
 const aiTarget = (b = AI.bands) => (b.min + b.good) / 2;                       // middle of the green band
 const fmtPct = (p) => (p == null ? "—" : `${p}%`);
 const fmtHrs = (h) => (Math.round(h * 100) / 100) + "h";
+const fmtSaved = (h) => (h < 0 ? `${fmtHrs(-h)} over` : fmtHrs(h));
 
 function aiBadge(pct) {
-  const band = aiBand(pct), w = pct == null ? 0 : Math.min(100, (pct / Math.max(AI.bands.max * 1.25, 1)) * 100);
+  const band = aiBand(pct), w = pct == null || pct < 0 ? 0 : Math.min(100, (pct / Math.max(AI.bands.max * 1.25, 1)) * 100);
   return `<div class="effc"><span class="eff ${band.id}">${fmtPct(pct)}</span><span class="effl">${esc(band.label)}</span>
     <div class="effbar"><div class="${band.id}" style="width:${w}%"></div><i style="left:${(AI.bands.min / (AI.bands.max * 1.25)) * 100}%"></i><i style="left:${(AI.bands.max / (AI.bands.max * 1.25)) * 100}%"></i></div></div>`;
 }
@@ -62,11 +68,14 @@ function aiJql(period) {
 
 function aiRow(is, meta) {
   const f = is.fields || {}, estS = f.timeoriginalestimate ?? f.aggregatetimeoriginalestimate ?? 0;
-  const parts = meta.saved.map((m) => ({ ...m, h: Number(f[m.id]) || 0 })), savedH = parts.reduce((a, p) => a + p.h, 0);
+  const spentS = f.timespent ?? f.aggregatetimespent ?? 0;
+  const parts = meta.saved.map((m) => ({ ...m, h: Number(f[m.id]) || 0 })), fieldH = parts.reduce((a, p) => a + p.h, 0);
+  const savedH = aiSavedH(estS, spentS);
   const used = meta.used ? (f[meta.used.id]?.value ?? (typeof f[meta.used.id] === "string" ? f[meta.used.id] : "")) : "";
   const tool = meta.tool ? [].concat(f[meta.tool.id] || []).map((o) => o?.value ?? o).filter(Boolean).join(", ") : "";
   const pct = aiPct(savedH, estS);
-  return { id: is.id, key: is.key, summary: f.summary || "", status: f.status?.name || "", type: f.issuetype?.name || "", estS, spentS: f.timespent ?? f.aggregatetimespent ?? 0, parts, savedH, used, tool, pct, band: aiBand(pct).id };
+  const done = f.status?.statusCategory?.key === "done";
+  return { id: is.id, key: is.key, summary: f.summary || "", status: f.status?.name || "", done, type: f.issuetype?.name || "", estS, spentS, parts, fieldH, savedH, used, tool, pct, band: aiBand(pct).id };
 }
 
 async function aiFetch(jql) {
@@ -115,8 +124,8 @@ function aiCard() {
   }
   const o = aiOverall(cur.rows), band = aiBand(o.pct);
   el.innerHTML = `<b class="eff ${band.id}">${fmtPct(o.pct)}</b><span>AI efficiency · ${mon}</span>
-    <small>${o.withEst ? `${fmtHrs(o.totSaved)} saved / ${fmtHrs(o.totEst / 3600)} estimate` : "no issue has an Original estimate"}${o.noEst ? ` · ${o.noEst} without estimate` : ""}${o.low + o.over ? `<br><span class="st-failed">${o.low + o.over} issue${o.low + o.over > 1 ? "s" : ""} outside ${AI.bands.min}–${AI.bands.max}%</span>` : ""}</small>`;
-  el.title = `AI efficiency for issues you logged work on in ${MONTHS[S.m]} ${S.y}\n= Σ AI Time Saved (dev+test+doc) ÷ Σ Original estimate, over issues that have an estimate.\nClick to open the AI efficiency report.`;
+    <small>${o.withEst ? `${fmtSaved(o.totSaved)} saved / ${fmtHrs(o.totEst / 3600)} estimate` : "no issue has an Original estimate"}${o.noEst ? ` · ${o.noEst} without estimate` : ""}${o.low + o.over ? `<br><span class="st-failed">${o.low + o.over} issue${o.low + o.over > 1 ? "s" : ""} outside ${AI.bands.min}–${AI.bands.max}%</span>` : ""}</small>`;
+  el.title = `AI efficiency for issues you logged work on in ${MONTHS[S.m]} ${S.y}\n= (Σ Original estimate without AI − Σ time logged with AI) ÷ Σ Original estimate, over issues that have an estimate.\nClick to open the AI efficiency report.`;
 }
 
 async function aiLoad(force) {
@@ -147,13 +156,13 @@ async function aiRefreshIssue(key) {
   } catch { /* the next refresh picks it up */ }
 }
 
-/** What to set so the issue lands in the middle of the green band (only the Development field changes). */
+/** Values to write the computed saving into Jira's "AI Time Saved – Development" field (others set to 0). */
 function aiSuggest(r) {
   const meta = AI.meta; if (!meta?.dev || !r.estS) return null;
-  const want = (aiTarget() / 100) * (r.estS / 3600), others = r.parts.filter((p) => p.id !== meta.dev.id).reduce((a, p) => a + p.h, 0);
-  const dev = Math.round((want - others) * 4) / 4;                      // quarter hours
-  if (dev < 0) return null;
+  const dev = Math.max(0, Math.round(r.savedH * 4) / 4);                 // quarter hours, never negative in Jira
+  if (Math.abs(dev - r.fieldH) < 0.25) return null;                      // Jira already matches
   const values = { [meta.dev.name]: dev };
+  for (const p of r.parts) if (p.id !== meta.dev.id && p.h) values[p.name] = 0;
   if (meta.used && dev > 0 && !/yes/i.test(r.used)) values[meta.used.name] = "Yes";
   return { dev, values };
 }
@@ -175,23 +184,23 @@ function aiRender() {
     ["all", rows.length, "Issues", ""], ["low", n("low"), `Below ${b.min}%`, "low"], ["good", n("good"), "On target", "good"],
     ["high", n("high"), `High ${b.good}–${b.max}%`, "high"], ["over", n("over"), `Above ${b.max}%`, "over"], ["noest", n("noest"), "No estimate", "noest"],
   ].map(([id, v, l, c]) => `<button class="stat aistat ${c} ${AI.filter === id ? "on" : ""}" data-f="${id}"><b>${v}</b><span>${esc(l)}</span></button>`).join("") +
-    `<div class="stat" title="Σ AI Time Saved ÷ Σ Original estimate, over the ${o.withEst} issue(s) that have an estimate"><b class="eff ${aiBand(overall).id}">${fmtPct(overall)}</b><span>Overall (${fmtHrs(totSaved)} saved of ${fmtHrs(totEst / 3600)})</span></div>`;
+    `<div class="stat" title="(Σ Original estimate − Σ logged) ÷ Σ Original estimate, over the ${o.withEst} issue(s) that have an estimate"><b class="eff ${aiBand(overall).id}">${fmtPct(overall)}</b><span>Overall (${fmtSaved(totSaved)} saved of ${fmtHrs(totEst / 3600)})</span></div>`;
 
   const order = { over: 0, low: 1, noest: 2, high: 3, good: 4 };
   const list = rows.filter((r) => AI.filter === "all" || r.band === AI.filter).sort((x, y) => order[x.band] - order[y.band] || (y.pct ?? -1) - (x.pct ?? -1));
   const base = creds.get()?.base || "";
-  $("#aiTable").innerHTML = `<tr><th>Issue</th><th>Status</th><th>Original estimate</th><th>Logged</th><th>AI time saved</th><th>AI efficiency</th><th>AI used</th><th></th></tr>` +
+  $("#aiTable").innerHTML = `<tr><th>Issue</th><th>Status</th><th>Original estimate <small class="muted">without AI</small></th><th>Logged <small class="muted">with AI</small></th><th>AI time saved</th><th>AI efficiency</th><th>AI used</th><th></th></tr>` +
     (list.map((r) => {
       const sug = (r.band === "low" || r.band === "over") ? aiSuggest(r) : null;
       const action = r.band === "noest" ? `<button class="small aifix" data-k="${esc(r.key)}">Add estimate</button>`
-        : sug ? `<button class="small aifix primary-s" data-k="${esc(r.key)}" data-sug="1" title="Opens Issue fields with this value filled in; you review and save">Set dev ${fmtHrs(sug.dev)} → ${aiTarget()}%</button>`
+        : sug ? `<button class="small aifix primary-s" data-k="${esc(r.key)}" data-sug="1" title="Opens Issue fields with “AI Time Saved – Development” = ${fmtHrs(sug.dev)} (estimate − logged) filled in; you review and save">Save ${fmtHrs(sug.dev)} to Jira</button>`
         : `<button class="small aifix" data-k="${esc(r.key)}">Fields</button>`;
       return `<tr class="airow ${r.band}">
         <td><a href="${esc(base)}/browse/${esc(r.key)}" target="_blank" rel="noopener noreferrer"><b>${esc(r.key)}</b></a><small class="muted">${esc(r.summary.slice(0, 70))}</small></td>
         <td class="muted">${esc(r.status)}</td>
         <td>${r.estS ? secsToDur(r.estS) : '<span class="st-failed">not set</span>'}</td>
-        <td class="muted">${r.spentS ? secsToDur(r.spentS) : "—"}</td>
-        <td title="${esc(r.parts.map((p) => `${p.name}: ${fmtHrs(p.h)}`).join("\n"))}"><b>${fmtHrs(r.savedH)}</b><small class="muted">${esc(r.parts.filter((p) => p.h).map((p) => `${p.kind} ${fmtHrs(p.h)}`).join(" · "))}</small></td>
+        <td class="muted">${r.spentS ? secsToDur(r.spentS) : "—"}${r.estS && !r.done && r.savedH > 0 ? '<small title="Still open: the saving shrinks while more time is logged">in progress</small>' : ""}</td>
+        <td title="${esc(`Original estimate ${secsToDur(r.estS)} − logged ${secsToDur(r.spentS)}` + (r.parts.length ? `\nIn Jira fields: ${r.parts.map((p) => `${p.name}: ${fmtHrs(p.h)}`).join(", ")}` : ""))}">${r.estS ? `<b class="${r.savedH < 0 ? "st-failed" : ""}">${fmtSaved(r.savedH)}</b>` : "—"}<small class="muted">${r.estS ? `${secsToDur(r.estS)} − ${secsToDur(r.spentS || 0)}` : ""}${r.fieldH ? ` · Jira field ${fmtHrs(r.fieldH)}` : ""}</small></td>
         <td>${aiBadge(r.pct)}</td>
         <td class="muted">${esc(r.used || "—")}${r.tool ? `<small>${esc(r.tool)}</small>` : ""}</td>
         <td class="nowrap">${action}</td></tr>`;
@@ -199,8 +208,8 @@ function aiRender() {
 }
 
 function aiCsv() {
-  const head = ["issue", "summary", "status", "original_estimate_h", "logged_h", ...(AI.meta?.saved || []).map((m) => m.name), "ai_saved_h", "ai_efficiency_pct", "band", "ai_used", "ai_tool"];
-  download(`ai-efficiency-${AI.period}-${todayStr()}.csv`, csv([head, ...AI.rows.map((r) => [r.key, r.summary, r.status, r.estS / 3600, r.spentS / 3600, ...r.parts.map((p) => p.h), r.savedH, r.pct ?? "", aiBand(r.pct).label, r.used, r.tool])]));
+  const head = ["issue", "summary", "status", "original_estimate_h (without AI)", "logged_h (with AI)", "ai_saved_h (estimate - logged)", "ai_efficiency_pct", "band", ...(AI.meta?.saved || []).map((m) => m.name + " (Jira field)"), "ai_used", "ai_tool"];
+  download(`ai-efficiency-${AI.period}-${todayStr()}.csv`, csv([head, ...AI.rows.map((r) => [r.key, r.summary, r.status, r.estS / 3600, r.spentS / 3600, r.estS ? r.savedH : "", r.pct ?? "", aiBand(r.pct).label, ...r.parts.map((p) => p.h), r.used, r.tool])]));
 }
 
 window.AIEFF = { band: aiBand, pct: aiPct, jiraSecs, badge: aiBadge, get bands() { return AI.bands; }, target: aiTarget, renderCard: aiCard, overall: aiOverall, monthLoad: aiMonthLoad };

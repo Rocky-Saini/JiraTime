@@ -810,5 +810,5 @@ document.addEventListener("input", (e) => { const t = e.target.closest?.("[data-
 // GL actions inside modals (folder picker, clone result, pull options…) go through gitlab.js's modal listener.
 
 glAddTab({ id: "local", icon: "⌂", label: "Local repos", render: () => gllRenderTab(), refresh: () => { if (!glDirect() || GL_GIT) gllFillList(); }, count: () => (GLLS.repos ? String(GLLS.repos.filter((r) => !r.kiroCache).length) : "") }, "projects");
-window.GLL = { reviewCopy: gllReviewCopy, switchBranch: gllSwitch, localFor: gllLocalFor, load: gllLoad, clone: gllClone, open: gllOpenRepo, pickFolder: gllPickFolder, parseConflicts: gllParseConflicts, join: gllJoin, graph: gllGraph, get state() { return GLLS; } };
+window.GLL = { ask: gllAsk, project: gllProject, reviewCopy: gllReviewCopy, switchBranch: gllSwitch, localFor: gllLocalFor, load: gllLoad, clone: gllClone, open: gllOpenRepo, pickFolder: gllPickFolder, parseConflicts: gllParseConflicts, join: gllJoin, graph: gllGraph, get state() { return GLLS; } };
 JT.on("view", (v) => { if (v === "gitlab" && (!glDirect() || GL_GIT)) gllLoad().then(() => { if (GL.tab === "overview") glRerender(); }).catch(() => {}); });

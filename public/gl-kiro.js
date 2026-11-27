@@ -73,6 +73,7 @@ async function glkRenderTab() {
         ${repos.some((r) => r.kiroCache) ? `<optgroup label="Review copies (any GitLab project)">${repos.filter((r) => r.kiroCache).map((r) => `<option value="${esc(r.id)}" ${r.id === GLK2.repo ? "selected" : ""}>${esc(r.remotePath || r.name)}</option>`).join("")}</optgroup>` : ""}
         <option value="__pick">＋ Any GitLab project…</option></select></label>
       <label>Branch <select id="glkBr"><option>…</option></select></label>
+      <div class="glk-git" id="glkGit"></div>
       <div class="gl-seg" title="What Kiro may do"><button class="${GLK2.mode === "ask" ? "on" : ""}" data-glact="glkmode:ask">👁 Read only</button><button class="${GLK2.mode === "edit" ? "on" : ""}" data-glact="glkmode:edit">✎ May edit files</button></div>
       <span class="grow"></span><span class="muted tiny" title="${esc(st.who || "")}">Kiro CLI ${esc((st.version || "").replace(/^kiro-cli\s*/, ""))}</span>
       <button class="small" data-glact="glkreview:local">🔍 Review my changes</button><button class="small" data-glact="glknew" title="Start a fresh conversation">＋ New chat</button>
@@ -107,6 +108,7 @@ async function glkBranches() {
     const local = br.branches.filter((b) => !b.remote).map((b) => b.name), remote = br.branches.filter((b) => b.remote && !local.includes(b.name.replace(/^origin\//, ""))).map((b) => b.name).slice(0, 300);
     sel.innerHTML = `<optgroup label="On this laptop">${local.map((n) => `<option value="L:${esc(n)}" ${n === st.branch ? "selected" : ""}>${esc(n)}</option>`).join("")}</optgroup>${remote.length ? `<optgroup label="On GitLab">${remote.map((n) => `<option value="R:${esc(n)}">${esc(n)}</option>`).join("")}</optgroup>` : ""}`;
     sel.dataset.cur = st.branch; sel.dataset.dirty = st.files.filter((f) => !f.untracked).length;
+    glkGitDraw(st);
     sel.onchange = async () => {
       const [k, name] = [sel.value.slice(0, 1), sel.value.slice(2)];
       sel.disabled = true;
@@ -201,6 +203,65 @@ function glkAttDraw() {
   el.classList.toggle("hidden", !GLK2.att.length);
 }
 document.addEventListener("click", (e) => { const b = e.target.closest("[data-glkrm]"); if (!b) return; GLK2.att = GLK2.att.filter((a) => a.key !== b.dataset.glkrm); glkAttDraw(); });
+
+// ================= git for the chosen repository: fetch / pull / push / commit =================
+function glkGitDraw(st) {
+  const el = $("#glkGit"); if (!el) return;
+  const repo = GLL.state.repos?.find((r) => r.id === GLK2.repo); if (!repo) { el.innerHTML = ""; return; }
+  if (repo.kiroCache) { el.innerHTML = `<span class="muted tiny" title="Review copy: read-only snapshot for Kiro">review copy</span><button class="small" data-glkgit="fetch" title="Get the newest branches and commits from GitLab">⟳ Fetch</button>`; return; }
+  const changed = st.files.length;
+  el.innerHTML = `<button class="small" data-glkgit="fetch" title="git fetch — see what is new on GitLab">⟳ Fetch</button>
+    <button class="small" data-glkgit="pull" title="git pull — bring the newest commits of ${esc(st.branch)} from GitLab" ${st.detached ? "disabled" : ""}>⬇ Pull${st.behind ? ` <span class="gl-tc">${st.behind}</span>` : ""}</button>
+    <button class="small ${st.ahead || (!st.upstream && !st.detached) ? "primary-s" : ""}" data-glkgit="push" title="git push — send your commits to GitLab" ${st.detached ? "disabled" : ""}>⬆ Push${st.ahead ? ` <span class="gl-tc">${st.ahead}</span>` : !st.upstream && !st.detached ? " (new)" : ""}</button>
+    ${changed ? `<button class="small" data-glkgit="commit" title="Open the changes to review, stage and commit them">✎ Commit <span class="gl-tc">${changed}</span></button>` : ""}
+    ${st.state ? `<button class="small danger" data-glkgit="commit" title="Resolve it in Local repos">⚠ ${esc(st.state)} in progress</button>` : ""}`;
+}
+async function glkGit(act) {
+  const id = GLK2.repo, el = $("#glkGit"); if (!id) return;
+  const busy = (t) => { if (el) el.querySelectorAll("button").forEach((b) => { b.disabled = true; }); toast(t); };
+  const done = () => glkBranches();
+  try {
+    if (act === "commit") { GLL.open(id); return; }
+    if (act === "fetch") { busy("Fetching…"); const r = await gitApi("/fetch", { repo: id }); const s = r.status; toast(s.behind ? `${s.behind} new commit${s.behind === 1 ? "" : "s"} on GitLab — press Pull` : "Up to date with GitLab"); return done(); }
+    if (act === "pull") {
+      let st = await gitApi(`/status?repo=${id}`);
+      if (st.files.some((f) => !f.untracked && !f.conflict)) {
+        const c = await GLL.ask("Uncommitted changes", "<p>You have uncommitted changes. Git stops if the new commits touch the same files.</p>", [["stash", "📦 Stash them, pull, then put them back", "primary-s"], ["go", "Pull anyway"], ["cancel", "Cancel"]]);
+        if (c === "cancel") return done();
+        if (c === "stash") { await gitApi("/stash/push", { repo: id, message: "JiraTime: before pull" }); st.stashedForPull = true; }
+      }
+      busy("Pulling…");
+      try { const r = await gitApi("/pull", { repo: id, mode: "ff" }); toast(/up.to.date/i.test(r.output || "") ? "Already up to date" : "Pulled the newest commits"); }
+      catch (e) {
+        if (!/fast-forward|diverg/i.test(e.message)) throw e;
+        const c = await GLL.ask(`${st.branch} changed on GitLab and on this laptop`, "<p>Both sides have commits the other does not have. How should they be combined?</p>", [["merge", "⤵ Merge GitLab's commits into mine", "primary-s"], ["rebase", "Rebase my commits on top of GitLab's"], ["leave", "Leave it for now"]]);
+        if (c !== "leave") {
+          const r = await gitApi("/pull", { repo: id, mode: c });
+          if (r.conflicts) {
+            const d = await GLL.ask("Conflicts", `<p>Some files were changed on both sides. Resolve them now, or undo the ${c}.</p>`, [["resolve", "🧩 Resolve conflicts", "primary-s"], ["abort", `Undo the ${c}`, "danger"]]);
+            if (d === "abort") await gitApi("/abort", { repo: id }); else { GLL.state.sub = "conflicts"; GLL.open(id); GLL.state.sub = "conflicts"; return; }
+          } else toast(`Up to date (${c})`);
+        }
+      }
+      if (st.stashedForPull) {
+        const r = await gitApi("/stash/pop", { repo: id, ref: "stash@{0}" }).catch((e) => ({ err: e.message }));
+        if (r.conflicts) { toast("Your changes clash with the new commits — resolve them"); GLL.state.sub = "conflicts"; GLL.open(id); return; }
+        if (r.err) toast("Pulled. Your changes are still in Stashes: " + r.err); else toast("Pulled and your changes are back");
+      }
+      return done();
+    }
+    if (act === "push") {
+      const st = await gitApi(`/status?repo=${id}`);
+      if (!st.upstream && !await uiConfirm(`Push the new branch “${st.branch}” to GitLab?`, { title: "Push new branch?", ok: "Push", danger: false })) return;
+      if (st.files.some((f) => !f.untracked) && !st.ahead && st.upstream) { toast("Nothing to push — commit your changes first"); return GLL.open(id); }
+      busy("Pushing…");
+      const r = await gitApi("/push", { repo: id }); toast(`Pushed ${r.status.branch} ✓`); done();
+      const repo = GLL.state.repos.find((x) => x.id === id), p = repo && GLL.project(repo);
+      if (p && window.GLM && r.status.branch !== (r.status.defaultBranch || p.branch) && await uiConfirm(`Open a merge request for ${r.status.branch}?`, { title: "Pushed ✓", ok: "🔀 Prepare merge request", cancel: "Not now", danger: false })) GLM.prepare(p, r.status.branch, r.status.defaultBranch || p.branch, repo);
+    }
+  } catch (e) { toast(e.message.split("\n").slice(-3).join(" ")); done(); }
+}
+document.addEventListener("click", (e) => { const b = e.target.closest("[data-glkgit]"); if (b && !b.disabled) glkGit(b.dataset.glkgit); });
 
 /** Choose any GitLab project for Kiro (a review copy is prepared if it is not on this laptop). */
 function glkPickProject() {

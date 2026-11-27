@@ -280,7 +280,7 @@
       <button id="aiCsv" class="small">⬇ Export CSV</button>
     </div>
     <div class="card airule">
-      <div><b>AI efficiency = AI time saved ÷ Original estimate.</b> AI time saved is the sum of all “AI Time Saved – … (Hours)” fields (Development, Testing, Documentation).
+      <div><b>AI efficiency = (Original estimate − time logged) ÷ Original estimate.</b> The Original estimate is the effort <i>without</i> AI (Kiro); the time you logged is the effort <i>with</i> AI — the difference is the time AI saved. Example: estimate 10h, logged 8h → 2h saved = 20%.
         <div id="aiRule" class="tiny" style="margin-top:6px"></div></div>
       <div class="aibands">
         <label>Minimum <span class="pctin"><input id="aiMin" type="number" min="0" max="100" step="1"> %</span></label>
@@ -292,7 +292,7 @@
     <div id="aiWarn"></div>
     <div id="aiStats" class="stats aistats"></div>
     <div class="card"><div class="scroll"><table id="aiTable" class="aitable"></table></div>
-      <p class="muted tiny">Click a coloured box above to filter. “Set dev … → 15%” opens Issue fields with “AI Time Saved – Development (Hours)” filled in so the issue lands in the middle of the green band — you review and press Save. Nothing is changed in Jira from this page.</p></div>
+      <p class="muted tiny">Click a coloured box above to filter. Logged more than the estimate shows as negative (“… over”). For open issues the saving shrinks while more time is logged. “Save … to Jira” opens Issue fields with “AI Time Saved – Development (Hours)” set to the computed saving, so Jira shows the same number — you review and press Save. Nothing is changed in Jira from this page.</p></div>
   </section>
 
   <!-- HOW TO USE -->
@@ -421,7 +421,7 @@
 
       <div class="card" id="h-ai">
         <h3>9 · AI efficiency</h3>
-        <p><b>AI efficiency = (AI Time Saved – Development + Testing + Documentation) ÷ Original estimate.</b> Example: estimate 16h, AI saved 2h → 12.5%.</p>
+        <p><b>AI efficiency = (Original estimate − time logged) ÷ Original estimate.</b> The Original estimate is how long the work takes without AI (Kiro); what you log is the real effort with AI. Example: estimate 16h, logged 14h → 2h saved → 12.5%. Logged more than the estimate gives a negative number.</p>
         <ul>
           <li><span class="eff low">below 10%</span> too low — highlighted, aim for at least 10%.</li>
           <li><span class="eff good">10–20%</span> on target (green).</li>
@@ -429,7 +429,7 @@
           <li><span class="eff over">above 40%</span> over the maximum — highlighted.</li>
           <li><span class="eff noest">No estimate</span> — set the Original estimate first.</li>
         </ul>
-        <p>Choose which issues to check (this month, last month, last 3 months, or your open issues). Click a coloured box to filter. For red/orange rows, <b>Set dev … → 15%</b> opens Issue fields with the value that brings the issue to the middle of the green band; review it and press Save. The limits (10 / 20 / 40) can be changed on the page. <i>Export CSV</i> gives the full report.</p>
+        <p>Choose which issues to check (this month, last month, last 3 months, or your open issues). Click a coloured box to filter. <b>Save … to Jira</b> opens Issue fields with “AI Time Saved – Development” set to the computed saving (estimate − logged) so Jira shows the same number; review it and press Save. The limits (10 / 20 / 40) can be changed on the page. <i>Export CSV</i> gives the full report.</p>
         <button class="small" data-go="ai">Open AI efficiency</button>
       </div>
 
